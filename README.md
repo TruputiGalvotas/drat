@@ -64,6 +64,8 @@ Commands:
     - `drat list --container <container> --volume <volume index> --fsoid <filesystem object ID>`
     - `drat list --container <container> --volume <volume index> --path <file/directory path>`
   - Lists directory entries or file metadata by FSOID or path.
+  - Options:
+    - `--no-cksum`: skip checksum validation during tree traversal.
 
 - `resolver`
   - Usage: `drat resolver --container <container> --volume <volume index> --oids <oid[,oid...]>`
@@ -79,6 +81,8 @@ Commands:
     - `--dentry-name <name[,name...]>`: dentry name filters.
     - `--dentry-oid <oid[,oid...]>`: dentry file-id filters.
     - `--dentry-oid-range <start-end>`: dentry file-id ranges.
+    - `--record-type <type[,type...]>`: filter record types: `dentry`, `file-extent`, `virtual`, `omap`.
+    - `--file-id <file-id>`: filter by file ID (dentries and file extents).
     - `--scan-omap`: scan omap leaf nodes.
     - `--omap-oid-range <start-end>`: omap OID ranges.
     - `--scan-virtual`: scan virtual objects.
@@ -87,6 +91,7 @@ Commands:
     - `--matches-only`: only print matches (suppress full listing).
     - `--summary`: only show progress and match counts (suppress match output).
     - `--export <path>`: write CSV results (see below).
+    - `--report`: report total extent sizes by file ID.
   - Default behavior scans the whole container and prints dentries.
 
 - `recover`
@@ -117,14 +122,14 @@ Notes:
 
 #### Requirements
 
-- GNU C Compiler (`gcc`) — Required because we use `__attribute__((packed))`. 
+- GNU C Compiler (`gcc`) — Required because we use `__attribute__((packed))`.
 
 - GNU Make (`make`).
 
 - GNU Argp library (`<argp.h>`) — Part of the GNU C Library (glibc):
 
   - On Ubuntu, ensure that the package `libc6-dev` is installed.
-  
+
   - On macOS, you can install just Argp via the [Homebrew](https://brew.sh)
     package `argp-standalone`. The Makefile will handle this configuration
     automatically. If you acquire Argp any other way, such as by installing

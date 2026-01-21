@@ -35,10 +35,12 @@
 typedef struct {
     int64_t fsoid;  // Needs to be `int64_t to work with `parse_number()`
     char* path;
+    bool require_cksum;
 } options_t;
 
 #define DRAT_ARG_KEY_FSOID  (DRAT_GLOBAL_ARGS_LAST_KEY - 1)
 #define DRAT_ARG_KEY_PATH   (DRAT_GLOBAL_ARGS_LAST_KEY - 2)
+#define DRAT_ARG_KEY_NO_CKSUM (DRAT_GLOBAL_ARGS_LAST_KEY - 3)
 
 #define DRAT_ARG_ERR_INVALID_FSOID  (DRAT_GLOBAL_ARGS_LAST_ERR - 1)
 #define DRAT_ARG_ERR_INVALID_PATH   (DRAT_GLOBAL_ARGS_LAST_ERR - 2)
@@ -49,6 +51,7 @@ static const struct argp_option argp_options[] = {
     // char* name,  int key,            char* arg,  int flags,  char* doc
     { "fsoid",      DRAT_ARG_KEY_FSOID, "fsoid",    0,          "Filesystem object ID" },
     { "path",       DRAT_ARG_KEY_PATH,  "path",     0,          "File/directory path" },
+    { "no-cksum",   DRAT_ARG_KEY_NO_CKSUM, 0,       0,          "Do not require checksum validation" },
     {0}
 };
 
@@ -66,6 +69,9 @@ static error_t argp_parser(int key, char* arg, struct argp_state* state) {
                 return DRAT_ARG_ERR_INVALID_PATH;
             }
             options->path = arg;
+            break;
+        case DRAT_ARG_KEY_NO_CKSUM:
+            options->require_cksum = false;
             break;
         case ARGP_KEY_END:
             if (globals.volume == -1) {
@@ -96,8 +102,8 @@ static void print_usage(FILE* stream) {
     fprintf(
         stream,
         "Usage:\n"
-        "  %1$s %2$s --container <container> --volume <volume index> --fsoid <filesystem object ID>\n"
-        "  %1$s %2$s --container <container> --volume <volume index> --path <file/directory path>\n"
+        "  %1$s %2$s --container <container> --volume <volume index> --fsoid <filesystem object ID> [--no-cksum]\n"
+        "  %1$s %2$s --container <container> --volume <volume index> --path <file/directory path> [--no-cksum]\n"
         "Examples:\n"
         "  %1$s %2$s --container /dev/disk0s2 --volume 1 0xd02a4 --fsoid 0x3af2\n"
         "  %1$s %2$s --container /dev/disk0s2 --volume 1 0xd02a4 --path /Users/john/Documents\n",
@@ -116,7 +122,7 @@ int cmd_list(int argc, char** argv) {
     // Set placeholder values so that the parser can identify whether the user
     // has set mandatory options or not
     globals.volume = -1;
-    options_t options = {-1, NULL};
+    options_t options = {-1, NULL, true};
 
     bool usage_error = true;
     error_t parse_result = argp_parse(&argp, argc, argv, ARGP_IN_ORDER, 0, &options);
@@ -146,6 +152,8 @@ int cmd_list(int argc, char** argv) {
         print_usage(stderr);
         return EX_USAGE;
     }
+
+    globals.require_cksum = options.require_cksum;
 
     // TODO: Perhaps handle other return values and factor out
     if (open_container() != 0) {

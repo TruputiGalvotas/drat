@@ -39,6 +39,17 @@ typedef struct {
 } oid_range_t;
 
 typedef struct {
+    uint64_t file_id;
+    uint64_t length_bytes;
+} extent_item_t;
+
+typedef struct {
+    uint64_t file_id;
+    uint64_t total_bytes;
+    uint64_t num_extents;
+} extent_stat_t;
+
+typedef struct {
     int64_t start_addr;
     int64_t end_addr;
     bool require_cksum;
@@ -46,6 +57,10 @@ typedef struct {
     bool scan_omap;
     bool scan_virtual;
     bool summary_only;
+    bool report;
+    size_t num_record_types;
+    char** record_types;
+    int64_t file_id;
     char* export_path;
     FILE* export_stream;
     size_t num_dentry_names;
@@ -73,6 +88,9 @@ typedef struct {
 #define DRAT_ARG_KEY_MATCHES_ONLY       (DRAT_GLOBAL_ARGS_LAST_KEY - 11)
 #define DRAT_ARG_KEY_EXPORT             (DRAT_GLOBAL_ARGS_LAST_KEY - 12)
 #define DRAT_ARG_KEY_SUMMARY            (DRAT_GLOBAL_ARGS_LAST_KEY - 13)
+#define DRAT_ARG_KEY_RECORD_TYPE        (DRAT_GLOBAL_ARGS_LAST_KEY - 14)
+#define DRAT_ARG_KEY_FILE_ID            (DRAT_GLOBAL_ARGS_LAST_KEY - 15)
+#define DRAT_ARG_KEY_REPORT             (DRAT_GLOBAL_ARGS_LAST_KEY - 16)
 
 #define DRAT_ARG_ERR_INVALID_START              (DRAT_GLOBAL_ARGS_LAST_ERR - 1)
 #define DRAT_ARG_ERR_INVALID_END                (DRAT_GLOBAL_ARGS_LAST_ERR - 2)
@@ -83,6 +101,8 @@ typedef struct {
 #define DRAT_ARG_ERR_INVALID_OMAP_OID_RANGE     (DRAT_GLOBAL_ARGS_LAST_ERR - 7)
 #define DRAT_ARG_ERR_OUT_OF_MEMORY              (DRAT_GLOBAL_ARGS_LAST_ERR - 8)
 #define DRAT_ARG_ERR_INVALID_EXPORT             (DRAT_GLOBAL_ARGS_LAST_ERR - 9)
+#define DRAT_ARG_ERR_INVALID_RECORD_TYPE        (DRAT_GLOBAL_ARGS_LAST_ERR - 10)
+#define DRAT_ARG_ERR_INVALID_FILE_ID            (DRAT_GLOBAL_ARGS_LAST_ERR - 11)
 
 static const struct argp_option argp_options[] = {
     // char* name,       int key,                    char* arg,            int flags,   char* doc
@@ -99,6 +119,9 @@ static const struct argp_option argp_options[] = {
     { "matches-only",    DRAT_ARG_KEY_MATCHES_ONLY,  0,                    0,           "Only print matches (suppress full listing)" },
     { "export",          DRAT_ARG_KEY_EXPORT,         "path",               0,           "Write CSV results to the specified path" },
     { "summary",         DRAT_ARG_KEY_SUMMARY,        0,                    0,           "Only show progress and match counts (suppress match output)" },
+    { "record-type",     DRAT_ARG_KEY_RECORD_TYPE,    "type[,type...]",     0,           "Record types to include: dentry,file-extent,virtual,omap" },
+    { "file-id",         DRAT_ARG_KEY_FILE_ID,        "file-id",            0,           "Filter by file ID (applies to dentries and file extents)" },
+    { "report",          DRAT_ARG_KEY_REPORT,         0,                    0,           "Report file IDs and total extent sizes at end" },
     {0}
 };
 
@@ -149,6 +172,10 @@ static bool add_range(oid_range_t** list, size_t* count, uint64_t start, uint64_
     *list = updated;
     (*count)++;
     return true;
+}
+
+static bool add_token(char*** list, size_t* count, const char* value) {
+    return add_string(list, count, value);
 }
 
 static bool parse_range(const char* arg, uint64_t* start, uint64_t* end) {
@@ -223,6 +250,47 @@ static error_t parse_oid_list(uint64_t** list, size_t* count, char* arg, int inv
     return 0;
 }
 
+static bool record_type_selected(const options_t* options, const char* type) {
+    if (options->num_record_types == 0) {
+        return true;
+    }
+    for (size_t i = 0; i < options->num_record_types; i++) {
+        if (strcasecmp(options->record_types[i], type) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static error_t parse_record_type_list(options_t* options, char* arg) {
+    char* option = arg;
+    char* const tokens[] = {0};
+    char* value = NULL;
+
+    while (*option) {
+        switch (getsubopt_posix(&option, tokens, &value)) {
+            case -1:
+                if (!value || !*value) {
+                    return DRAT_ARG_ERR_INVALID_RECORD_TYPE;
+                }
+                if (strcasecmp(value, "dentry") != 0
+                    && strcasecmp(value, "file-extent") != 0
+                    && strcasecmp(value, "virtual") != 0
+                    && strcasecmp(value, "omap") != 0) {
+                    return DRAT_ARG_ERR_INVALID_RECORD_TYPE;
+                }
+                if (!add_token(&options->record_types, &options->num_record_types, value)) {
+                    return DRAT_ARG_ERR_OUT_OF_MEMORY;
+                }
+                break;
+            default:
+                assert(false);
+                return DRAT_ARG_ERR_INVALID_RECORD_TYPE;
+        }
+    }
+    return 0;
+}
+
 static error_t argp_parser(int key, char* arg, struct argp_state* state) {
     options_t* options = state->input;
 
@@ -285,6 +353,16 @@ static error_t argp_parser(int key, char* arg, struct argp_state* state) {
             break;
         case DRAT_ARG_KEY_SUMMARY:
             options->summary_only = true;
+            break;
+        case DRAT_ARG_KEY_RECORD_TYPE:
+            return parse_record_type_list(options, arg);
+        case DRAT_ARG_KEY_FILE_ID:
+            if (!parse_number(&options->file_id, arg) || options->file_id < 0) {
+                return DRAT_ARG_ERR_INVALID_FILE_ID;
+            }
+            break;
+        case DRAT_ARG_KEY_REPORT:
+            options->report = true;
             break;
         case DRAT_ARG_KEY_EXPORT:
             if (!arg || !*arg) {
@@ -375,6 +453,30 @@ static void export_file_extent(FILE* stream, uint64_t block_addr, btree_node_phy
     );
 }
 
+static int compare_extent_items(const void* a, const void* b) {
+    const extent_item_t* left = a;
+    const extent_item_t* right = b;
+    if (left->file_id < right->file_id) {
+        return -1;
+    }
+    if (left->file_id > right->file_id) {
+        return 1;
+    }
+    return 0;
+}
+
+static int compare_extent_stats_by_total(const void* a, const void* b) {
+    const extent_stat_t* left = a;
+    const extent_stat_t* right = b;
+    if (left->total_bytes < right->total_bytes) {
+        return 1;
+    }
+    if (left->total_bytes > right->total_bytes) {
+        return -1;
+    }
+    return 0;
+}
+
 /**
  * Print usage info for this program.
  */
@@ -405,6 +507,10 @@ int cmd_search(int argc, char** argv) {
         .scan_omap = false,
         .scan_virtual = false,
         .summary_only = false,
+        .report = false,
+        .num_record_types = 0,
+        .record_types = NULL,
+        .file_id = -1,
         .export_path = NULL,
         .export_stream = NULL,
         .num_dentry_names = 0,
@@ -453,6 +559,12 @@ int cmd_search(int argc, char** argv) {
                 break;
             case DRAT_ARG_ERR_INVALID_EXPORT:
                 fprintf(stderr, "%s: option `--export` has invalid value.\n", globals.program_name);
+                break;
+            case DRAT_ARG_ERR_INVALID_RECORD_TYPE:
+                fprintf(stderr, "%s: option `--record-type` has invalid value; use dentry,file-extent,virtual,omap.\n", globals.program_name);
+                break;
+            case DRAT_ARG_ERR_INVALID_FILE_ID:
+                fprintf(stderr, "%s: option `--file-id` has invalid value.\n", globals.program_name);
                 break;
             default:
                 print_arg_parse_error();
@@ -525,6 +637,8 @@ int cmd_search(int argc, char** argv) {
 
     uint64_t num_matches = 0;
     uint64_t addr_range_size = (end_addr == UINT64_MAX) ? 0 : (end_addr - start_addr);
+    extent_item_t* extent_items = NULL;
+    size_t num_extent_items = 0;
 
     /** Search over all blocks **/
     const char spinner[] = "|/-\\";
@@ -583,7 +697,7 @@ int cmd_search(int argc, char** argv) {
         }
 
         /** Scan omap leaf nodes **/
-        if (options.scan_omap) {
+        if (options.scan_omap && record_type_selected(&options, "omap")) {
             if (   is_btree_node_phys_non_root(block)
                 && is_omap_tree(block)
             ) {
@@ -628,7 +742,7 @@ int cmd_search(int argc, char** argv) {
         }
 
         /** Scan virtual objects **/
-        if (options.scan_virtual) {
+        if (options.scan_virtual && record_type_selected(&options, "virtual")) {
             if ((block->o_type & OBJ_STORAGETYPE_MASK) == OBJ_VIRTUAL) {
                 bool has_filter = options.num_virtual_oids > 0;
                 bool match = has_filter ? matches_any_oid(block->o_oid, options.virtual_oids, options.num_virtual_oids)
@@ -642,9 +756,10 @@ int cmd_search(int argc, char** argv) {
             }
         }
 
-        /** Scan FS B-tree dentries **/
+        /** Scan FS B-tree records **/
         if (   is_btree_node_phys(block)
             && is_fs_tree(block)
+            && (record_type_selected(&options, "dentry") || record_type_selected(&options, "file-extent") || options.report)
         ) {
             btree_node_phys_t* node = block;
 
@@ -670,9 +785,12 @@ int cmd_search(int argc, char** argv) {
             for (uint32_t i = 0; i < node->btn_nkeys; i++, toc_entry++) {
                 j_key_t* hdr = key_start + toc_entry->k.off;
                 uint8_t record_type = (hdr->obj_id_and_type & OBJ_TYPE_MASK) >> OBJ_TYPE_SHIFT;
-                if (record_type == APFS_TYPE_DIR_REC) {
+                if (record_type == APFS_TYPE_DIR_REC && record_type_selected(&options, "dentry")) {
                     j_drec_hashed_key_t* key = hdr;
                     j_drec_val_t* val = val_end - toc_entry->v.off;
+                    if (options.file_id != -1 && (uint64_t)options.file_id != val->file_id) {
+                        continue;
+                    }
 
                     bool name_ok = !has_name_filter;
                     if (has_name_filter) {
@@ -707,11 +825,29 @@ int cmd_search(int argc, char** argv) {
                     if (options.export_stream && (options.list_all || has_name_filter || has_oid_filter)) {
                         export_dentry(options.export_stream, addr, node, key, val);
                     }
-                } else if (record_type == APFS_TYPE_FILE_EXTENT) {
+                } else if (record_type == APFS_TYPE_FILE_EXTENT && (record_type_selected(&options, "file-extent") || options.report)) {
                     j_file_extent_key_t* key = hdr;
                     j_file_extent_val_t* val = val_end - toc_entry->v.off;
+                    if (options.file_id != -1 && (uint64_t)options.file_id != (key->hdr.obj_id_and_type & OBJ_ID_MASK)) {
+                        continue;
+                    }
                     if (options.export_stream) {
                         export_file_extent(options.export_stream, addr, node, key, val);
+                    }
+                    if (options.report) {
+                        uint64_t length_bytes = val->len_and_flags & J_FILE_EXTENT_LEN_MASK;
+                        extent_item_t item = {
+                            .file_id = key->hdr.obj_id_and_type & OBJ_ID_MASK,
+                            .length_bytes = length_bytes,
+                        };
+                        extent_item_t* updated = realloc(extent_items, (num_extent_items + 1) * sizeof(*extent_items));
+                        if (!updated) {
+                            fprintf(stderr, "\nWARNING: Not enough memory to track extent stats; report will be incomplete.\n");
+                            options.report = false;
+                        } else {
+                            extent_items = updated;
+                            extent_items[num_extent_items++] = item;
+                        }
                     }
                 }
             }
@@ -719,6 +855,44 @@ int cmd_search(int argc, char** argv) {
     }
 
     fprintf(stderr, "\n");
+    if (options.report) {
+        if (num_extent_items == 0) {
+            printf("\nReport: no file extents collected.\n");
+        } else {
+            qsort(extent_items, num_extent_items, sizeof(*extent_items), compare_extent_items);
+            extent_stat_t* stats = malloc(num_extent_items * sizeof(*stats));
+            if (!stats) {
+                fprintf(stderr, "\nWARNING: Not enough memory for report summary.\n");
+            } else {
+                size_t num_stats = 0;
+                extent_stat_t current = {
+                    .file_id = extent_items[0].file_id,
+                    .total_bytes = 0,
+                    .num_extents = 0,
+                };
+                for (size_t i = 0; i < num_extent_items; i++) {
+                    if (extent_items[i].file_id != current.file_id) {
+                        stats[num_stats++] = current;
+                        current.file_id = extent_items[i].file_id;
+                        current.total_bytes = 0;
+                        current.num_extents = 0;
+                    }
+                    current.total_bytes += extent_items[i].length_bytes;
+                    current.num_extents++;
+                }
+                stats[num_stats++] = current;
+
+                qsort(stats, num_stats, sizeof(*stats), compare_extent_stats_by_total);
+                printf("\nReport: file extents by file ID (sorted by total bytes)\n");
+                printf("file_id,total_bytes,num_extents\n");
+                for (size_t i = 0; i < num_stats; i++) {
+                    printf("%#" PRIx64 ",%" PRIu64 ",%" PRIu64 "\n", stats[i].file_id, stats[i].total_bytes, stats[i].num_extents);
+                }
+                free(stats);
+            }
+        }
+    }
+
     printf("\n\nFinished search; found %" PRIu64 " results.\n\n", num_matches);
     if (options.export_stream) {
         fclose(options.export_stream);
@@ -726,11 +900,16 @@ int cmd_search(int argc, char** argv) {
     for (size_t i = 0; i < options.num_dentry_names; i++) {
         free(options.dentry_names[i]);
     }
+    for (size_t i = 0; i < options.num_record_types; i++) {
+        free(options.record_types[i]);
+    }
     free(options.dentry_names);
     free(options.dentry_oids);
     free(options.dentry_oid_ranges);
     free(options.virtual_oids);
     free(options.omap_oid_ranges);
+    free(options.record_types);
+    free(extent_items);
     
     return 0;
 }

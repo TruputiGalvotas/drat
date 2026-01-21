@@ -12,6 +12,7 @@ global_options_t globals = {
     0,      // block_size (0 = auto)
     0,      // volume (0 = container, not any volume)
     NULL,   // volume_name
+    true,   // require_cksum
 };
 
 /**

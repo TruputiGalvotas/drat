@@ -2,6 +2,7 @@
 #define DRAT_GLOBALS_H
 
 #include <stdint.h>
+#include <stdbool.h>
 #include <apfs/general.h>
 #include <apfs/object.h>
 
@@ -19,6 +20,7 @@ typedef struct {
     int64_t     volume;
 
     char*       volume_name;
+    bool        require_cksum;
 } global_options_t;
 
 extern global_options_t globals;

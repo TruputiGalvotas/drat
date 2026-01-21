@@ -389,8 +389,11 @@ j_rec_t** get_fs_records(btree_node_phys_t* vol_omap_root_node, btree_node_phys_
         // `node` is now the child node we will scan on next loop
 
         if (!is_cksum_valid(node)) {
-            fprintf(stderr, "\nABORT: get_fs_records: Checksum of node at block %#"PRIx64" did not validate.\n", child_node_omap_entry->val.ov_paddr);
-            exit(-1);
+            if (globals.require_cksum) {
+                fprintf(stderr, "\nABORT: get_fs_records: Checksum of node at block %#"PRIx64" did not validate.\n", child_node_omap_entry->val.ov_paddr);
+                exit(-1);
+            }
+            fprintf(stderr, "\nWARNING: get_fs_records: Checksum of node at block %#"PRIx64" did not validate; proceeding anyway.\n", child_node_omap_entry->val.ov_paddr);
         }
 
         toc_start = (char*)(node->btn_data) + node->btn_table_space.off;
