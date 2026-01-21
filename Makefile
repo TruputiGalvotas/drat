@@ -16,6 +16,8 @@ override CFLAGS += \
 -Wno-multichar \
 -Wno-unused-variable \
 -Wno-unused-parameter \
+-Wno-unused-but-set-variable \
+-Wno-deprecated-non-prototype \
 -Wno-missing-field-initializers \
 -I./$(INCDIR)
 
