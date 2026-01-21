@@ -32,11 +32,49 @@
 #include <drat/string/fs.h>
 #include <drat/string/j.h>
 
+typedef struct {
+    bool require_cksum;
+} options_t;
+
+#define DRAT_ARG_KEY_NO_CKSUM   (DRAT_GLOBAL_ARGS_LAST_KEY - 1)
+
+static const struct argp_option argp_options[] = {
+    // char* name,      int key,               char* arg,  int flags,  char* doc
+    { "no-cksum",       DRAT_ARG_KEY_NO_CKSUM, 0,          0,          "Do not require checksum validation" },
+    {0}
+};
+
+static error_t argp_parser(int key, char* arg, struct argp_state* state) {
+    options_t* options = state->input;
+    (void)arg;
+
+    switch (key) {
+        case DRAT_ARG_KEY_NO_CKSUM:
+            options->require_cksum = false;
+            break;
+        case ARGP_KEY_END:
+            return 0;
+        default:
+            return ARGP_ERR_UNKNOWN;
+    }
+
+    return 0;
+}
+
+// TODO: Perhaps factor out from all commands
+static const struct argp argp = {
+    &argp_options,  // struct argp_option* options
+    &argp_parser,   // argp_parser_t parser
+    0,              // char* args_doc
+    0,              // char* doc
+    &argp_children  // struct argp_child* children
+};
+
 static void print_usage(FILE* stream) {
     fprintf(
         stream,
-        "Usage:   %1$s %2$s --container <container>\n"
-        "Example: %1$s %2$s --container /dev/disk0s2\n",
+        "Usage:   %1$s %2$s --container <container> [options]\n"
+        "Example: %1$s %2$s --container /dev/disk0s2 --no-cksum\n",
         globals.program_name,
         globals.command_name
     );
@@ -49,9 +87,13 @@ int cmd_inspect(int argc, char** argv) {
         return 0;
     }
 
-    // Just parse global options
+    options_t options = {
+        .require_cksum = true,
+    };
+
+    // Parse global and command options
     bool usage_error = true;
-    error_t parse_result = argp_parse(&argp_globals, argc, argv, ARGP_IN_ORDER, 0, 0);
+    error_t parse_result = argp_parse(&argp, argc, argv, ARGP_IN_ORDER, 0, &options);
     if (!print_global_args_error(parse_result)) {
         switch (parse_result) {
             case 0:
@@ -85,7 +127,9 @@ int cmd_inspect(int argc, char** argv) {
     }
 
     printf("validating ... ");
-    if (is_cksum_valid(nxsb)) {
+    if (!options.require_cksum) {
+        printf("SKIPPED (ignoring checksum).\n");
+    } else if (is_cksum_valid(nxsb)) {
         printf("OK.\n");
     } else {
         printf("FAILED.\n!! APFS ERROR !! Checksum of block 0x0 should validate, but it doesn't. Proceeding as if it does.\n");
@@ -141,8 +185,12 @@ int cmd_inspect(int argc, char** argv) {
 
     for (uint32_t i = 0; i < xp_desc_blocks; i++) {
         if (!is_cksum_valid(xp_desc[i])) {
-            printf("- !! APFS WARNING !! Block at index %"PRIu32" within this area failed checksum validation. Skipping it.\n", i);
-            continue;
+            printf("- !! APFS WARNING !! Block at index %"PRIu32" within this area failed checksum validation.", i);
+            if (options.require_cksum) {
+                printf(" Skipping it.\n");
+                continue;
+            }
+            printf(" Proceeding anyway.\n");
         }
         
         if (is_nx_superblock(xp_desc[i])) {
@@ -267,17 +315,21 @@ int cmd_inspect(int argc, char** argv) {
     assert(num_read = xp_obj_len);
 
     printf("Validating the Ephemeral objects ... ");
-    for (uint32_t i = 0; i < xp_obj_len; i++) {
-        if (!is_cksum_valid(xp_obj[i])) {
-            printf("FAILED.\n");
-            printf("An Ephemeral object used by this checkpoint is malformed. Going back to look at the previous checkpoint instead.\n");
-            
-            // TODO: Handle case where data for a given checkpoint is malformed
-            printf("END: Handling of this case has not yet been implemented.\n");
-            return 0;
+    if (!options.require_cksum) {
+        printf("SKIPPED (ignoring checksum).\n");
+    } else {
+        for (uint32_t i = 0; i < xp_obj_len; i++) {
+            if (!is_cksum_valid(xp_obj[i])) {
+                printf("FAILED.\n");
+                printf("An Ephemeral object used by this checkpoint is malformed. Going back to look at the previous checkpoint instead.\n");
+                
+                // TODO: Handle case where data for a given checkpoint is malformed
+                printf("END: Handling of this case has not yet been implemented.\n");
+                return 0;
+            }
         }
+        printf("OK.\n");
     }
-    printf("OK.\n");
 
     free(xp);
     free(xp_desc);
@@ -301,15 +353,18 @@ int cmd_inspect(int argc, char** argv) {
     printf("OK.\n");
     
     printf("Validating the container object map ... ");
-    if (!is_cksum_valid(nx_omap)) {
+    if (!options.require_cksum) {
+        printf("SKIPPED (ignoring checksum).\n");
+    } else if (!is_cksum_valid(nx_omap)) {
         printf("FAILED.\n");
         printf("This container object map is malformed. Going back to look at the previous checkpoint instead.\n");
         
         // TODO: Handle case where a given container object map is malformed
         printf("END: Handling of this case has not yet been implemented.\n");
         return 0;
+    } else {
+        printf("OK.\n");
     }
-    printf("OK.\n");
 
     printf("\nDetails of the container object map:\n");
     printf("--------------------------------------------------------------------------------\n");
@@ -335,7 +390,9 @@ int cmd_inspect(int argc, char** argv) {
     printf("OK.\n");
 
     printf("Validating the root node of the container object map B-tree ... ");
-    if (!is_cksum_valid(nx_omap_btree)) {
+    if (!options.require_cksum) {
+        printf("SKIPPED (ignoring checksum).\n");
+    } else if (!is_cksum_valid(nx_omap_btree)) {
         printf("FAILED.\n");
     } else {
         printf("OK.\n");
@@ -381,7 +438,7 @@ int cmd_inspect(int argc, char** argv) {
 
     printf("Validating the APFS volume superblocks ... ");
     for (uint32_t i = 0; i < num_file_systems; i++) {
-        if (!is_cksum_valid(apsbs + i)) {
+        if (options.require_cksum && !is_cksum_valid(apsbs + i)) {
             printf("FAILED.\n- The checksum of the APFS volume with OID %#"PRIx64" did not validate.\n- Going back to look at the previous checkpoint instead.\n", nxsb->nx_fs_oid[i]);
 
             // TODO: Handle case where data for a given checkpoint is malformed
@@ -397,7 +454,11 @@ int cmd_inspect(int argc, char** argv) {
             return 0;
         }
     }
-    printf("OK.\n");
+    if (!options.require_cksum) {
+        printf("SKIPPED checksums (ignoring checksum).\n");
+    } else {
+        printf("OK.\n");
+    }
 
     printf("\nDetails of these volume superblocks:\n");
     printf("--------------------------------------------------------------------------------\n");
@@ -431,14 +492,17 @@ int cmd_inspect(int argc, char** argv) {
         printf("OK.\n");
 
         printf("Validating the volume object map ... ");
-        if (!is_cksum_valid(fs_omap)) {
+        if (!options.require_cksum) {
+            printf("SKIPPED (ignoring checksum).\n");
+        } else if (!is_cksum_valid(fs_omap)) {
             printf("FAILED.\n- The checksum did not validate.\n- Going back to look at the previous checkpoint instead.\n");
 
             // TODO: Handle case where data for a given checkpoint is malformed
             printf("END: Handling of this case has not yet been implemented.\n");
             return 0;
+        } else {
+            printf("OK.\n");
         }
-        printf("OK.\n");
 
         printf("\nDetails of the volume object map:\n");
         printf("--------------------------------------------------------------------------------\n");
@@ -464,7 +528,9 @@ int cmd_inspect(int argc, char** argv) {
         printf("OK.\n");
 
         printf("Validating the root node of the volume object map B-tree ... ");
-        if (!is_cksum_valid(fs_omap_btree)) {
+        if (!options.require_cksum) {
+            printf("SKIPPED (ignoring checksum).\n");
+        } else if (!is_cksum_valid(fs_omap_btree)) {
             printf("FAILED.\n");
         } else {
             printf("OK.\n");
@@ -497,14 +563,17 @@ int cmd_inspect(int argc, char** argv) {
         }
         free(fs_root_entry);  // No longer need the block address of the file-system root.
         printf("validating ... ");
-        if (!is_cksum_valid(fs_root_btree)) {
+        if (!options.require_cksum) {
+            printf("SKIPPED (ignoring checksum).\n");
+        } else if (!is_cksum_valid(fs_root_btree)) {
             printf("FAILED.\nGoing back to look at the previous checkpoint instead.\n");
 
             // TODO: Handle case where data for a given checkpoint is malformed
             printf("END: Handling of this case has not yet been implemented.\n");
             return 0;
+        } else {
+            printf("OK.\n");
         }
-        printf("OK.\n");
 
         printf("\nDetails of the file-system B-tree root node:\n");
         printf("--------------------------------------------------------------------------------\n");

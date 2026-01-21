@@ -25,6 +25,93 @@ binaries for versioned releases on the [releases page](https://github.com/jivanp
 Documentation for versioned releases and as generated from the `main` branch
 [can be viewed online](https://drat.readthedocs.io/).
 
+### Command-line usage
+
+General syntax:
+
+```
+drat [global options] <command> [command options]
+```
+
+Global options:
+
+- `--container <path>` (required): APFS container device or image.
+- `--block-size <size|auto>`: APFS block size in bytes (default `auto`).
+- `--volume <index>`: APFS volume index.
+- `--volume-name <name>`: APFS volume name.
+- `--max-xid <xid>`: maximum transaction ID.
+
+Commands:
+
+- `inspect`
+  - Usage: `drat inspect --container <container> [--no-cksum]`
+  - Prints container and checkpoint metadata.
+
+- `read`
+  - Usage: `drat read --container <container> --block <block address>`
+  - Reads a block and prints decoded structure info.
+
+- `explore-omap-tree`
+  - Usage: `drat explore-omap-tree --container <container> --omap <omap tree root node address>`
+  - Walks and prints an object map B-tree.
+
+- `explore-fs-tree`
+  - Usage: `drat explore-fs-tree --container <container> --fs <fs tree root node address> --omap <omap tree root node address>`
+  - Walks and prints a filesystem B-tree.
+
+- `list`
+  - Usage:
+    - `drat list --container <container> --volume <volume index> --fsoid <filesystem object ID>`
+    - `drat list --container <container> --volume <volume index> --path <file/directory path>`
+  - Lists directory entries or file metadata by FSOID or path.
+
+- `resolver`
+  - Usage: `drat resolver --container <container> --volume <volume index> --oids <oid[,oid...]>`
+  - Options:
+    - `--omap <omap tree addr>`: supply a specific omap root instead of using `--volume`.
+    - `--oids <oid[,oid...]>` or `--oid <oid>` (repeatable alias).
+  - Resolves Virtual OIDs to Physical OIDs.
+
+- `search`
+  - Usage: `drat search --container <container> [options]`
+  - Options:
+    - `--start <block addr>` / `--end <block addr>`: scan range (inclusive/exclusive).
+    - `--dentry-name <name[,name...]>`: dentry name filters.
+    - `--dentry-oid <oid[,oid...]>`: dentry file-id filters.
+    - `--dentry-oid-range <start-end>`: dentry file-id ranges.
+    - `--scan-omap`: scan omap leaf nodes.
+    - `--omap-oid-range <start-end>`: omap OID ranges.
+    - `--scan-virtual`: scan virtual objects.
+    - `--virtual-oid <oid[,oid...]>`: virtual OID filters.
+    - `--no-cksum`: skip checksum validation.
+    - `--matches-only`: only print matches (suppress full listing).
+    - `--export <path>`: write CSV results (see below).
+  - Default behavior scans the whole container and prints dentries.
+
+- `recover`
+  - Metadata-based recovery (requires intact trees):
+    - `drat recover --container <container> --volume <volume index> --fsoid <filesystem object ID>`
+    - `drat recover --container <container> --volume <volume index> --path <file path>`
+  - Recovery from search export:
+    - `drat recover --container <container> --from-search <export.csv> --file-id <file-id> [--output <path>]`
+    - `drat recover --container <container> --from-search <export.csv> --name <file name> [--output <path>]`
+  - Raw extent scan (metadata-missing mode):
+    - `drat recover --container <container> --scan-extents --file-id <file-id> [--start <block>] [--end <block>] [--output <path>] [--no-cksum]`
+  - Options:
+    - `--output <path>`: output file path (use `-` for stdout; if a directory, a file is created inside).
+    - `--skip-multilinked-inodes`: recover multi-linked files as empty files.
+
+- `version`
+  - Usage: `drat version`
+  - Prints version, license, and warranty info.
+
+Notes:
+
+- Numerical arguments accept decimal, hex (`0x`), or octal (`0`) formats.
+- `modify` exists in the source tree but is currently disabled and not exposed as a command.
+- `search --export` writes CSV with columns:
+  - `type,block_addr,node_oid,node_xid,file_id,name,logical_addr,phys_block,length_bytes`
+
 ### Compiling the software
 
 #### Requirements

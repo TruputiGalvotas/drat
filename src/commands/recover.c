@@ -39,17 +39,38 @@ typedef struct {
     char*   path;
     char*   output;
     bool    skip_multilinked_inodes;
+    char*   from_search;
+    bool    scan_extents;
+    int64_t file_id;
+    char*   name;
+    int64_t start_addr;
+    int64_t end_addr;
+    bool    require_cksum;
 } options_t;
 
 #define DRAT_ARG_KEY_FSOID  (DRAT_GLOBAL_ARGS_LAST_KEY - 1)
 #define DRAT_ARG_KEY_PATH   (DRAT_GLOBAL_ARGS_LAST_KEY - 2)
 #define DRAT_ARG_KEY_OUTPUT (DRAT_GLOBAL_ARGS_LAST_KEY - 3)
 #define DRAT_ARG_KEY_SKIP_MULTILINKED_INODES (DRAT_GLOBAL_ARGS_LAST_KEY - 4)
+#define DRAT_ARG_KEY_FROM_SEARCH (DRAT_GLOBAL_ARGS_LAST_KEY - 5)
+#define DRAT_ARG_KEY_FILE_ID (DRAT_GLOBAL_ARGS_LAST_KEY - 6)
+#define DRAT_ARG_KEY_NAME (DRAT_GLOBAL_ARGS_LAST_KEY - 7)
+#define DRAT_ARG_KEY_SCAN_EXTENTS (DRAT_GLOBAL_ARGS_LAST_KEY - 8)
+#define DRAT_ARG_KEY_START (DRAT_GLOBAL_ARGS_LAST_KEY - 9)
+#define DRAT_ARG_KEY_END (DRAT_GLOBAL_ARGS_LAST_KEY - 10)
+#define DRAT_ARG_KEY_NO_CKSUM (DRAT_GLOBAL_ARGS_LAST_KEY - 11)
 
 #define DRAT_ARG_ERR_INVALID_FSOID  (DRAT_GLOBAL_ARGS_LAST_ERR - 1)
 #define DRAT_ARG_ERR_INVALID_PATH   (DRAT_GLOBAL_ARGS_LAST_ERR - 2)
 #define DRAT_ARG_ERR_NO_VOLUME      (DRAT_GLOBAL_ARGS_LAST_ERR - 3)
 #define DRAT_ARG_ERR_NO_ENTRYPOINT  (DRAT_GLOBAL_ARGS_LAST_ERR - 4)
+#define DRAT_ARG_ERR_INVALID_FROM_SEARCH (DRAT_GLOBAL_ARGS_LAST_ERR - 5)
+#define DRAT_ARG_ERR_INVALID_FILE_ID (DRAT_GLOBAL_ARGS_LAST_ERR - 6)
+#define DRAT_ARG_ERR_INVALID_NAME (DRAT_GLOBAL_ARGS_LAST_ERR - 7)
+#define DRAT_ARG_ERR_INVALID_START (DRAT_GLOBAL_ARGS_LAST_ERR - 8)
+#define DRAT_ARG_ERR_INVALID_END (DRAT_GLOBAL_ARGS_LAST_ERR - 9)
+#define DRAT_ARG_ERR_MODE_CONFLICT (DRAT_GLOBAL_ARGS_LAST_ERR - 10)
+#define DRAT_ARG_ERR_NO_TARGET (DRAT_GLOBAL_ARGS_LAST_ERR - 11)
 
 static const struct argp_option argp_options[] = {
     // char* name,  int key,                char* arg,      int flags,  char* doc
@@ -57,6 +78,13 @@ static const struct argp_option argp_options[] = {
     { "path",       DRAT_ARG_KEY_PATH,      "path",         0,          "File path" },
     { "output",     DRAT_ARG_KEY_OUTPUT,    "output path",  0,          "Path where the recovered file will be written" },
     { "skip-multilinked-inodes", DRAT_ARG_KEY_SKIP_MULTILINKED_INODES, 0, 0, "Recover multilinked files (files which have more than one hardlink) as empty files"},
+    { "from-search", DRAT_ARG_KEY_FROM_SEARCH, "path",      0,          "Recover from CSV exported by `search --export`" },
+    { "file-id",    DRAT_ARG_KEY_FILE_ID,   "file-id",      0,          "File ID to recover (used with --from-search or --scan-extents)" },
+    { "name",       DRAT_ARG_KEY_NAME,      "name",         0,          "File name to recover (used with --from-search)" },
+    { "scan-extents", DRAT_ARG_KEY_SCAN_EXTENTS, 0,         0,          "Scan container for file extents (metadata-missing mode)" },
+    { "start",      DRAT_ARG_KEY_START,     "block addr",   0,          "Start block address for extent scan" },
+    { "end",        DRAT_ARG_KEY_END,       "block addr",   0,          "End block address for extent scan" },
+    { "no-cksum",   DRAT_ARG_KEY_NO_CKSUM,  0,              0,          "Do not require checksum validation during extent scan" },
     {0}
 };
 
@@ -81,7 +109,52 @@ static error_t argp_parser(int key, char* arg, struct argp_state* state) {
         case DRAT_ARG_KEY_SKIP_MULTILINKED_INODES:
             options->skip_multilinked_inodes = true;
             break;
+        case DRAT_ARG_KEY_FROM_SEARCH:
+            if (!arg || !*arg) {
+                return DRAT_ARG_ERR_INVALID_FROM_SEARCH;
+            }
+            options->from_search = arg;
+            break;
+        case DRAT_ARG_KEY_FILE_ID:
+            if (!parse_number(&options->file_id, arg) || options->file_id < 0) {
+                return DRAT_ARG_ERR_INVALID_FILE_ID;
+            }
+            break;
+        case DRAT_ARG_KEY_NAME:
+            if (!arg || !*arg) {
+                return DRAT_ARG_ERR_INVALID_NAME;
+            }
+            options->name = arg;
+            break;
+        case DRAT_ARG_KEY_SCAN_EXTENTS:
+            options->scan_extents = true;
+            break;
+        case DRAT_ARG_KEY_START:
+            if (!parse_number(&options->start_addr, arg) || options->start_addr < 0) {
+                return DRAT_ARG_ERR_INVALID_START;
+            }
+            break;
+        case DRAT_ARG_KEY_END:
+            if (!parse_number(&options->end_addr, arg) || options->end_addr < 0) {
+                return DRAT_ARG_ERR_INVALID_END;
+            }
+            break;
+        case DRAT_ARG_KEY_NO_CKSUM:
+            options->require_cksum = false;
+            break;
         case ARGP_KEY_END:
+            if (options->from_search && options->scan_extents) {
+                return DRAT_ARG_ERR_MODE_CONFLICT;
+            }
+            if (options->from_search || options->scan_extents) {
+                if (options->from_search && options->file_id == -1 && !options->name) {
+                    return DRAT_ARG_ERR_NO_TARGET;
+                }
+                if (options->scan_extents && options->file_id == -1) {
+                    return DRAT_ARG_ERR_NO_TARGET;
+                }
+                break;
+            }
             if (globals.volume == -1) {
                 return DRAT_ARG_ERR_NO_VOLUME;
             }
@@ -105,15 +178,442 @@ static const struct argp argp = {
     &argp_children  // struct argp_child* children
 };
 
+typedef struct {
+    uint64_t logical_addr;
+    uint64_t phys_block;
+    uint64_t length_bytes;
+} extent_t;
+
+static int compare_extents(const void* a, const void* b) {
+    const extent_t* left = a;
+    const extent_t* right = b;
+    if (left->logical_addr < right->logical_addr) {
+        return -1;
+    }
+    if (left->logical_addr > right->logical_addr) {
+        return 1;
+    }
+    return 0;
+}
+
+static bool add_extent(extent_t** list, size_t* count, extent_t extent) {
+    extent_t* updated = realloc(*list, (*count + 1) * sizeof(**list));
+    if (!updated) {
+        return false;
+    }
+    updated[*count] = extent;
+    *list = updated;
+    (*count)++;
+    return true;
+}
+
+static size_t parse_csv_fields(char* line, char** fields, size_t max_fields) {
+    size_t count = 0;
+    char* p = line;
+    char* out = line;
+
+    while (*p && count < max_fields) {
+        if (*p == '\r' || *p == '\n') {
+            break;
+        }
+        if (*p == '"') {
+            p++;
+            char* start = out;
+            while (*p) {
+                if (*p == '"') {
+                    if (*(p + 1) == '"') {
+                        *out++ = '"';
+                        p += 2;
+                        continue;
+                    }
+                    p++;
+                    break;
+                }
+                *out++ = *p++;
+            }
+            *out++ = '\0';
+            fields[count++] = start;
+            if (*p == ',') {
+                p++;
+            }
+        } else {
+            char* start = out;
+            while (*p && *p != ',' && *p != '\r' && *p != '\n') {
+                *out++ = *p++;
+            }
+            *out++ = '\0';
+            fields[count++] = start;
+            if (*p == ',') {
+                p++;
+            }
+        }
+    }
+    return count;
+}
+
+static int open_recovery_output(const char* output, const char* suggested_name, FILE** file_stream, FILE** info_stream, char** temp_path, char** final_path) {
+    *file_stream = stdout;
+    *info_stream = stderr;
+    *temp_path = NULL;
+    *final_path = NULL;
+
+    if (!output || strcmp(output, "-") == 0) {
+        return 0;
+    }
+
+    char* output_copy = strdup(output);
+    if (!output_copy) {
+        fprintf(stderr, "ABORT: Not enough memory for output path.\n");
+        return EX_OSERR;
+    }
+
+    size_t len = strlen(output_copy);
+    bool ends_with_slash = len > 0 && output_copy[len - 1] == '/';
+    if (ends_with_slash) {
+        output_copy[len - 1] = '\0';
+    }
+
+    char* target_dir = NULL;
+    char* target_name = NULL;
+    char* last_slash = strrchr(output_copy, '/');
+
+    if (ends_with_slash) {
+        target_dir = (*output_copy == '\0') ? "/" : output_copy;
+        target_name = (char*)(suggested_name ? suggested_name : "recovered.bin");
+    } else if (last_slash == NULL) {
+        target_dir = ".";
+        target_name = output_copy;
+    } else {
+        *last_slash = '\0';
+        target_dir = output_copy;
+        target_name = last_slash + 1;
+    }
+
+    if (!target_name || !*target_name) {
+        target_name = "recovered.bin";
+    }
+
+    asprintf(temp_path, "%s/_com.dratapp.recover_%s", target_dir, target_name);
+    if (!*temp_path) {
+        free(output_copy);
+        fprintf(stderr, "ABORT: Not enough memory for output file path.\n");
+        return EX_OSERR;
+    }
+    asprintf(final_path, "%s/%s", target_dir, target_name);
+    if (!*final_path) {
+        free(output_copy);
+        fprintf(stderr, "ABORT: Not enough memory for output file path.\n");
+        return EX_OSERR;
+    }
+
+    fprintf(*info_stream, "Creating file `%s` ... ", *temp_path);
+    int fd = open(*temp_path, O_CREAT | O_WRONLY | O_EXCL, S_IRUSR | S_IWUSR);
+    if (fd < 0) {
+        free(output_copy);
+        switch (errno) {
+            case EACCES:
+                fprintf(stderr, "ABORT: The directory `%s` does not permit you to write to it.\n", target_dir);
+                return EX_CANTCREAT;
+            case EDQUOT:
+                fprintf(stderr, "ABORT: You have exceeded your quota to write to the directory `%s`.\n", target_dir);
+                return EX_CANTCREAT;
+            case EEXIST:
+                fprintf(stderr, "END: File `%s` already exists. Use `--overwrite` to forcefully overwite it (TODO: Not yet implemented).\n", *temp_path);
+                return EX_CANTCREAT;
+            case EINTR:
+                fprintf(stderr, "ABORT: Our call to `open()` was interrupted by a signal.\n");
+                return EX_TEMPFAIL;
+            case EIO:
+                fprintf(stderr, "ABORT: An I/O error occured whilst creating `%s`.\n", *temp_path);
+                return EX_IOERR;
+            case EISDIR:
+                fprintf(stderr, "ABORT: A directory named `%s` already exists.\n", *temp_path);
+                return EX_CANTCREAT;
+            case ELOOP:
+                fprintf(stderr, "ABORT: Too many symlinks.\n");
+                return EX_OSERR;
+            default:
+                fprintf(stderr, "ABORT: Unknown error when attempting to open file descriptor for `%s`.\n", *temp_path);
+                return EX_IOERR;
+        }
+    }
+    *file_stream = fdopen(fd, "w");
+    if (!*file_stream) {
+        free(output_copy);
+        fprintf(stderr, "ABORT: Error when attempting to convert file descriptor for `%s` to file pointer: %s\n", *temp_path, get_fopen_error_msg());
+        return EX_IOERR;
+    }
+    fprintf(*info_stream, "OK.\n");
+    *info_stream = stdout;
+
+    free(output_copy);
+    return 0;
+}
+
+static int write_extents(FILE* file_stream, FILE* info_stream, extent_t* extents, size_t num_extents) {
+    if (num_extents == 0) {
+        fprintf(info_stream, "END: No extents found for the specified file ID.\n");
+        return 0;
+    }
+
+    qsort(extents, num_extents, sizeof(extent_t), compare_extents);
+
+    char* buffer = malloc(globals.block_size);
+    char* zero_buffer = calloc(1, globals.block_size);
+    if (!buffer || !zero_buffer) {
+        fprintf(stderr, "ABORT: Not enough memory for buffers.\n");
+        free(buffer);
+        free(zero_buffer);
+        return EX_OSERR;
+    }
+
+    uint64_t current_logical = 0;
+    for (size_t i = 0; i < num_extents; i++) {
+        extent_t* extent = &extents[i];
+        if (extent->logical_addr > current_logical) {
+            uint64_t gap = extent->logical_addr - current_logical;
+            while (gap > 0) {
+                uint64_t bytes_to_write = gap < (uint64_t)globals.block_size ? gap : (uint64_t)globals.block_size;
+                if (fwrite(zero_buffer, bytes_to_write, 1, file_stream) != 1) {
+                    fprintf(stderr, "\n\nEncountered an error writing zero fill. Exiting.\n\n");
+                    free(buffer);
+                    free(zero_buffer);
+                    return EX_IOERR;
+                }
+                gap -= bytes_to_write;
+            }
+            current_logical = extent->logical_addr;
+        }
+
+        uint64_t bytes_remaining = extent->length_bytes;
+        uint64_t block_addr = extent->phys_block;
+        while (bytes_remaining > 0) {
+            if (read_blocks(buffer, block_addr, 1) != 1) {
+                fprintf(stderr, "\n\nEncountered an error reading block %#"PRIx64". Exiting.\n\n", block_addr);
+                free(buffer);
+                free(zero_buffer);
+                return EX_IOERR;
+            }
+            uint64_t bytes_to_write = bytes_remaining < (uint64_t)globals.block_size ? bytes_remaining : (uint64_t)globals.block_size;
+            if (fwrite(buffer, bytes_to_write, 1, file_stream) != 1) {
+                fprintf(stderr, "\n\nEncountered an error writing block. Exiting.\n\n");
+                free(buffer);
+                free(zero_buffer);
+                return EX_IOERR;
+            }
+            bytes_remaining -= bytes_to_write;
+            block_addr++;
+        }
+        if (extent->logical_addr + extent->length_bytes > current_logical) {
+            current_logical = extent->logical_addr + extent->length_bytes;
+        }
+    }
+
+    free(buffer);
+    free(zero_buffer);
+    return 0;
+}
+
+static int64_t find_file_id_by_name(const char* export_path, const char* name) {
+    FILE* stream = fopen(export_path, "r");
+    if (!stream) {
+        return -1;
+    }
+
+    char* line = NULL;
+    size_t cap = 0;
+    char* fields[9] = {0};
+    int64_t file_id = -1;
+
+    while (getline(&line, &cap, stream) != -1) {
+        size_t count = parse_csv_fields(line, fields, 9);
+        if (count < 6) {
+            continue;
+        }
+        if (strcmp(fields[0], "type") == 0) {
+            continue;
+        }
+        if (strcmp(fields[0], "DENTRY") == 0) {
+            if (fields[5] && strcmp(fields[5], name) == 0) {
+                if (!parse_number(&file_id, fields[4])) {
+                    file_id = -1;
+                }
+                break;
+            }
+        }
+    }
+
+    free(line);
+    fclose(stream);
+    return file_id;
+}
+
+static int recover_from_search_export(const char* export_path, int64_t file_id, FILE* file_stream, FILE* info_stream) {
+    FILE* stream = fopen(export_path, "r");
+    if (!stream) {
+        fprintf(stderr, "ABORT: Failed to open export file `%s`.\n", export_path);
+        return EX_NOINPUT;
+    }
+
+    extent_t* extents = NULL;
+    size_t num_extents = 0;
+    char* line = NULL;
+    size_t cap = 0;
+    char* fields[9] = {0};
+
+    while (getline(&line, &cap, stream) != -1) {
+        size_t count = parse_csv_fields(line, fields, 9);
+        if (count < 9) {
+            continue;
+        }
+        if (strcmp(fields[0], "type") == 0) {
+            continue;
+        }
+        if (strcmp(fields[0], "FILE_EXTENT") == 0) {
+            int64_t parsed_file_id = -1;
+            if (!parse_number(&parsed_file_id, fields[4]) || parsed_file_id != file_id) {
+                continue;
+            }
+            int64_t logical_addr = -1;
+            int64_t phys_block = -1;
+            int64_t length_bytes = -1;
+            if (!parse_number(&logical_addr, fields[6]) || !parse_number(&phys_block, fields[7]) || !parse_number(&length_bytes, fields[8])) {
+                continue;
+            }
+            extent_t extent = {
+                .logical_addr = (uint64_t)logical_addr,
+                .phys_block = (uint64_t)phys_block,
+                .length_bytes = (uint64_t)length_bytes,
+            };
+            if (!add_extent(&extents, &num_extents, extent)) {
+                fprintf(stderr, "ABORT: Not enough memory for extents.\n");
+                free(line);
+                fclose(stream);
+                free(extents);
+                return EX_OSERR;
+            }
+        }
+    }
+
+    free(line);
+    fclose(stream);
+
+    int result = write_extents(file_stream, info_stream, extents, num_extents);
+    free(extents);
+    return result;
+}
+
+static int recover_from_extent_scan(options_t* options, FILE* file_stream, FILE* info_stream) {
+    obj_phys_t* block = malloc(globals.block_size);
+    if (!block) {
+        fprintf(stderr, "ABORT: Could not allocate sufficient memory for `block`.\n");
+        return EX_OSERR;
+    }
+
+    bool have_block_count = false;
+    uint64_t num_blocks = 0;
+    if (read_blocks(block, 0x0, 1) == 1) {
+        if (is_nx_superblock(block) && ((nx_superblock_t*)block)->nx_magic == NX_MAGIC) {
+            num_blocks = ((nx_superblock_t*)block)->nx_block_count;
+            have_block_count = true;
+        }
+    }
+
+    if (options->start_addr != -1 && options->end_addr != -1 && options->start_addr >= options->end_addr) {
+        fprintf(stderr, "%s: option `--start` must be less than `--end`.\n", globals.program_name);
+        return EX_USAGE;
+    }
+
+    uint64_t start_addr = options->start_addr != -1 ? (uint64_t)options->start_addr : 0;
+    uint64_t end_addr = 0;
+    if (options->end_addr != -1) {
+        end_addr = (uint64_t)options->end_addr;
+    } else if (have_block_count) {
+        end_addr = num_blocks;
+    } else {
+        end_addr = UINT64_MAX;
+    }
+
+    extent_t* extents = NULL;
+    size_t num_extents = 0;
+
+    for (uint64_t addr = start_addr; addr < end_addr; addr++) {
+        if (read_blocks(block, addr, 1) != 1) {
+            if (end_of_container()) {
+                break;
+            }
+            continue;
+        }
+        if (options->require_cksum && !is_cksum_valid(block)) {
+            continue;
+        }
+
+        if (is_btree_node_phys(block) && is_fs_tree(block)) {
+            btree_node_phys_t* node = block;
+            if (node->btn_flags & BTNODE_FIXED_KV_SIZE) {
+                continue;
+            }
+            if (!(node->btn_flags & BTNODE_LEAF)) {
+                continue;
+            }
+
+            char* toc_start = (char*)node->btn_data + node->btn_table_space.off;
+            char* key_start = toc_start + node->btn_table_space.len;
+            char* val_end   = (char*)node + globals.block_size;
+            if (node->btn_flags & BTNODE_ROOT) {
+                val_end -= sizeof(btree_info_t);
+            }
+
+            kvloc_t* toc_entry = toc_start;
+            for (uint32_t i = 0; i < node->btn_nkeys; i++, toc_entry++) {
+                j_key_t* hdr = key_start + toc_entry->k.off;
+                uint8_t record_type = (hdr->obj_id_and_type & OBJ_TYPE_MASK) >> OBJ_TYPE_SHIFT;
+                if (record_type != APFS_TYPE_FILE_EXTENT) {
+                    continue;
+                }
+
+                j_file_extent_key_t* key = hdr;
+                if ((int64_t)(key->hdr.obj_id_and_type & OBJ_ID_MASK) != options->file_id) {
+                    continue;
+                }
+                j_file_extent_val_t* val = val_end - toc_entry->v.off;
+                uint64_t length_bytes = val->len_and_flags & J_FILE_EXTENT_LEN_MASK;
+
+                extent_t extent = {
+                    .logical_addr = key->logical_addr,
+                    .phys_block = val->phys_block_num,
+                    .length_bytes = length_bytes,
+                };
+                if (!add_extent(&extents, &num_extents, extent)) {
+                    fprintf(stderr, "ABORT: Not enough memory for extents.\n");
+                    free(extents);
+                    free(block);
+                    return EX_OSERR;
+                }
+            }
+        }
+    }
+
+    free(block);
+    int result = write_extents(file_stream, info_stream, extents, num_extents);
+    free(extents);
+    return result;
+}
+
 static void print_usage(FILE* stream) {
     fprintf(
         stream,
         "Usage:\n"
         "  %1$s %2$s --container <container> --volume <volume index> --fsoid <filesystem object ID>\n"
         "  %1$s %2$s --container <container> --volume <volume index> --path <file path>\n"
+        "  %1$s %2$s --container <container> --from-search <export.csv> --file-id <file-id> [--output <path>]\n"
+        "  %1$s %2$s --container <container> --from-search <export.csv> --name <file name> [--output <path>]\n"
+        "  %1$s %2$s --container <container> --scan-extents --file-id <file-id> [--start <block>] [--end <block>] [--output <path>]\n"
         "Examples:\n"
         "  %1$s %2$s --container /dev/disk0s2 --volume 1 0xd02a4 --fsoid 0x3af2\n"
-        "  %1$s %2$s --container /dev/disk0s2 --volume 1 0xd02a4 --path /Users/john/Documents/file.txt\n",
+        "  %1$s %2$s --container /dev/disk0s2 --volume 1 0xd02a4 --path /Users/john/Documents/file.txt\n"
+        "  %1$s %2$s --container /dev/disk0s2 --from-search results.csv --name Secrets.txt --output ./\n"
+        "  %1$s %2$s --container /dev/disk0s2 --scan-extents --file-id 0x1a2b3 --output ./recovered.bin\n",
         globals.program_name,
         globals.command_name
     );
@@ -129,7 +629,19 @@ int cmd_recover(int argc, char** argv) {
     // Set placeholder values so that the parser can identify whether the user
     // has set mandatory options or not
     globals.volume = -1;
-    options_t options = {-1, NULL, "-"};
+    options_t options = {
+        .fsoid = -1,
+        .path = NULL,
+        .output = "-",
+        .skip_multilinked_inodes = false,
+        .from_search = NULL,
+        .scan_extents = false,
+        .file_id = -1,
+        .name = NULL,
+        .start_addr = -1,
+        .end_addr = -1,
+        .require_cksum = true,
+    };
 
     bool usage_error = true;
     error_t parse_result = argp_parse(&argp, argc, argv, ARGP_IN_ORDER, 0, &options);
@@ -150,6 +662,27 @@ int cmd_recover(int argc, char** argv) {
             case DRAT_ARG_ERR_NO_ENTRYPOINT:
                 fprintf(stderr, "%s: entrypoint is mandatory; use either `--fsoid` or `--path`.\n", globals.program_name);
                 break;
+            case DRAT_ARG_ERR_INVALID_FROM_SEARCH:
+                fprintf(stderr, "%s: option `--from-search` has invalid value.\n", globals.program_name);
+                break;
+            case DRAT_ARG_ERR_INVALID_FILE_ID:
+                fprintf(stderr, "%s: option `--file-id` has invalid value.\n", globals.program_name);
+                break;
+            case DRAT_ARG_ERR_INVALID_NAME:
+                fprintf(stderr, "%s: option `--name` has invalid value.\n", globals.program_name);
+                break;
+            case DRAT_ARG_ERR_INVALID_START:
+                fprintf(stderr, "%s: option `--start` has invalid value.\n", globals.program_name);
+                break;
+            case DRAT_ARG_ERR_INVALID_END:
+                fprintf(stderr, "%s: option `--end` has invalid value.\n", globals.program_name);
+                break;
+            case DRAT_ARG_ERR_MODE_CONFLICT:
+                fprintf(stderr, "%s: options `--from-search` and `--scan-extents` are mutually exclusive.\n", globals.program_name);
+                break;
+            case DRAT_ARG_ERR_NO_TARGET:
+                fprintf(stderr, "%s: a target is mandatory; use `--file-id` or `--name` with `--from-search`, or `--file-id` with `--scan-extents`.\n", globals.program_name);
+                break;
             default:
                 print_arg_parse_error();
                 return EX_SOFTWARE;
@@ -158,6 +691,66 @@ int cmd_recover(int argc, char** argv) {
     if (usage_error) {
         print_usage(stderr);
         return EX_USAGE;
+    }
+
+    if (options.from_search || options.scan_extents) {
+        int64_t file_id = options.file_id;
+        if (options.from_search && file_id == -1 && options.name) {
+            file_id = find_file_id_by_name(options.from_search, options.name);
+            if (file_id == -1) {
+                fprintf(stderr, "END: No dentry found for name `%s` in search export.\n", options.name);
+                return 0;
+            }
+        }
+
+        char* suggested_name = NULL;
+        if (options.name) {
+            suggested_name = options.name;
+        } else if (file_id != -1) {
+            asprintf(&suggested_name, "fileid_%#" PRIx64 ".bin", (uint64_t)file_id);
+        }
+
+        FILE* file_stream = stdout;
+        FILE* info_stream = stderr;
+        char* temp_path = NULL;
+        char* final_path = NULL;
+
+        int output_result = open_recovery_output(options.output, suggested_name, &file_stream, &info_stream, &temp_path, &final_path);
+        if (suggested_name && suggested_name != options.name) {
+            free(suggested_name);
+        }
+        if (output_result != 0) {
+            return output_result;
+        }
+
+        setbuf(stdout, NULL);
+        if (open_container__info_stream(info_stream) != 0) {
+            if (file_stream != stdout) {
+                fclose(file_stream);
+            }
+            free(temp_path);
+            free(final_path);
+            return EX_NOINPUT;
+        }
+
+        int result = 0;
+        if (options.from_search) {
+            result = recover_from_search_export(options.from_search, file_id, file_stream, info_stream);
+        } else {
+            options.file_id = file_id;
+            result = recover_from_extent_scan(&options, file_stream, info_stream);
+        }
+
+        close_container();
+        if (file_stream != stdout) {
+            fclose(file_stream);
+        }
+        if (temp_path && final_path) {
+            rename(temp_path, final_path);
+        }
+        free(temp_path);
+        free(final_path);
+        return result;
     }
 
     char* target_dir    = NULL; // This is just the dirname of the output file (not the entire path), without trailing slash
