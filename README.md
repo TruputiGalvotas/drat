@@ -29,7 +29,7 @@ Documentation for versioned releases and as generated from the `main` branch
 
 General syntax:
 
-```
+```sh
 drat [global options] <command> [command options]
 ```
 
@@ -85,6 +85,7 @@ Commands:
     - `--virtual-oid <oid[,oid...]>`: virtual OID filters.
     - `--no-cksum`: skip checksum validation.
     - `--matches-only`: only print matches (suppress full listing).
+    - `--summary`: only show progress and match counts (suppress match output).
     - `--export <path>`: write CSV results (see below).
   - Default behavior scans the whole container and prints dentries.
 

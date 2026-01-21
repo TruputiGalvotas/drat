@@ -7,6 +7,7 @@
 #include <inttypes.h>
 #include <sysexits.h>
 #include <argp.h>
+#include <time.h>
 
 #include <apfs/object.h>
 #include <apfs/nx.h>
@@ -44,6 +45,7 @@ typedef struct {
     bool list_all;
     bool scan_omap;
     bool scan_virtual;
+    bool summary_only;
     char* export_path;
     FILE* export_stream;
     size_t num_dentry_names;
@@ -70,6 +72,7 @@ typedef struct {
 #define DRAT_ARG_KEY_OMAP_OID_RANGE     (DRAT_GLOBAL_ARGS_LAST_KEY - 10)
 #define DRAT_ARG_KEY_MATCHES_ONLY       (DRAT_GLOBAL_ARGS_LAST_KEY - 11)
 #define DRAT_ARG_KEY_EXPORT             (DRAT_GLOBAL_ARGS_LAST_KEY - 12)
+#define DRAT_ARG_KEY_SUMMARY            (DRAT_GLOBAL_ARGS_LAST_KEY - 13)
 
 #define DRAT_ARG_ERR_INVALID_START              (DRAT_GLOBAL_ARGS_LAST_ERR - 1)
 #define DRAT_ARG_ERR_INVALID_END                (DRAT_GLOBAL_ARGS_LAST_ERR - 2)
@@ -95,6 +98,7 @@ static const struct argp_option argp_options[] = {
     { "no-cksum",        DRAT_ARG_KEY_NO_CKSUM,       0,                    0,           "Do not require checksum validation" },
     { "matches-only",    DRAT_ARG_KEY_MATCHES_ONLY,  0,                    0,           "Only print matches (suppress full listing)" },
     { "export",          DRAT_ARG_KEY_EXPORT,         "path",               0,           "Write CSV results to the specified path" },
+    { "summary",         DRAT_ARG_KEY_SUMMARY,        0,                    0,           "Only show progress and match counts (suppress match output)" },
     {0}
 };
 
@@ -279,6 +283,9 @@ static error_t argp_parser(int key, char* arg, struct argp_state* state) {
         case DRAT_ARG_KEY_MATCHES_ONLY:
             options->list_all = false;
             break;
+        case DRAT_ARG_KEY_SUMMARY:
+            options->summary_only = true;
+            break;
         case DRAT_ARG_KEY_EXPORT:
             if (!arg || !*arg) {
                 return DRAT_ARG_ERR_INVALID_EXPORT;
@@ -397,6 +404,7 @@ int cmd_search(int argc, char** argv) {
         .list_all = true,
         .scan_omap = false,
         .scan_virtual = false,
+        .summary_only = false,
         .export_path = NULL,
         .export_stream = NULL,
         .num_dentry_names = 0,
@@ -521,22 +529,41 @@ int cmd_search(int argc, char** argv) {
     /** Search over all blocks **/
     const char spinner[] = "|/-\\";
     size_t spinner_index = 0;
-    uint64_t progress_interval = 1024;
-    if (addr_range_size > 0) {
-        progress_interval = addr_range_size / 100;
-        if (progress_interval < 1024) {
-            progress_interval = 1024;
-        }
-    }
+    time_t start_time = time(NULL);
+    time_t last_update = start_time;
 
     for (uint64_t addr = start_addr; addr < end_addr; addr++) {
-        if (addr == start_addr || (addr % progress_interval) == 0) {
+        time_t now = time(NULL);
+        if (addr == start_addr || now - last_update >= 1) {
+            last_update = now;
+            uint64_t blocks_scanned = addr - start_addr;
+            double elapsed = difftime(now, start_time);
+            double rate = elapsed > 0.0 ? (double)blocks_scanned / elapsed : 0.0;
             if (addr_range_size > 0) {
-                double pct = 100.0 * (double)(addr - start_addr) / (double)addr_range_size;
-                printf("\r[%c] Reading block %#9" PRIx64 " (%6.2f%%) ... ", spinner[spinner_index++ % 4], addr, pct);
+                double pct = 100.0 * (double)blocks_scanned / (double)addr_range_size;
+                double remaining = (rate > 0.0) ? (double)(addr_range_size - blocks_scanned) / rate : 0.0;
+                fprintf(stderr, "\r[%c] blocks: %" PRIu64 " / %" PRIu64 " (%6.2f%%) | %.1f blk/s | ETA %.0fs",
+                    spinner[spinner_index++ % 4],
+                    blocks_scanned,
+                    addr_range_size,
+                    pct,
+                    rate,
+                    remaining
+                );
+                if (options.summary_only) {
+                    fprintf(stderr, " | matches: %" PRIu64, num_matches);
+                }
             } else {
-                printf("\r[%c] Reading block %#9" PRIx64 " ... ", spinner[spinner_index++ % 4], addr);
+                fprintf(stderr, "\r[%c] blocks scanned: %" PRIu64 " | %.1f blk/s",
+                    spinner[spinner_index++ % 4],
+                    blocks_scanned,
+                    rate
+                );
+                if (options.summary_only) {
+                    fprintf(stderr, " | matches: %" PRIu64, num_matches);
+                }
             }
+            fflush(stderr);
         }
 
         if (read_blocks(block, addr, 1) != 1) {
@@ -584,14 +611,16 @@ int cmd_search(int argc, char** argv) {
                         kvoff_t* last_toc_entry = first_toc_entry + node->btn_nkeys - 1;
                         omap_key_t* last_key = key_start + last_toc_entry->k;
                         num_matches++;
-                        printf("\rOMAP %#8" PRIx64 " || Node XID = %#9" PRIx64 " || from (OID, XID) = (%#9" PRIx64 ", %#9" PRIx64 ") => (%#9" PRIx64 ", %#9" PRIx64 ")\n",
-                            addr,
-                            node->btn_o.o_xid,
-                            first_key->ok_oid,
-                            first_key->ok_xid,
-                            last_key->ok_oid,
-                            last_key->ok_xid
-                        );
+                        if (!options.summary_only) {
+                            printf("\rOMAP %#8" PRIx64 " || Node XID = %#9" PRIx64 " || from (OID, XID) = (%#9" PRIx64 ", %#9" PRIx64 ") => (%#9" PRIx64 ", %#9" PRIx64 ")\n",
+                                addr,
+                                node->btn_o.o_xid,
+                                first_key->ok_oid,
+                                first_key->ok_xid,
+                                last_key->ok_oid,
+                                last_key->ok_xid
+                            );
+                        }
                         break;
                     }
                 }
@@ -606,7 +635,9 @@ int cmd_search(int argc, char** argv) {
                                         : options.list_all;
                 if (match) {
                     num_matches++;
-                    printf("\rVIRTUAL %#8" PRIx64 " || OID = %#9" PRIx64 " || XID = %#9" PRIx64 "\n", addr, block->o_oid, block->o_xid);
+                    if (!options.summary_only) {
+                        printf("\rVIRTUAL %#8" PRIx64 " || OID = %#9" PRIx64 " || XID = %#9" PRIx64 "\n", addr, block->o_oid, block->o_xid);
+                    }
                 }
             }
         }
@@ -662,14 +693,16 @@ int cmd_search(int argc, char** argv) {
                     if (name_ok && oid_ok && (options.list_all || has_name_filter || has_oid_filter)) {
                         uint16_t name_len = key->name_len_and_hash & J_DREC_LEN_MASK;
                         num_matches++;
-                        printf("\rDENTRY %#8" PRIx64 " || Node OID = %#9" PRIx64 " || XID = %#9" PRIx64 " || FileID = %#9" PRIx64 " || Name = %.*s\n",
-                            addr,
-                            node->btn_o.o_oid,
-                            node->btn_o.o_xid,
-                            val->file_id,
-                            name_len,
-                            key->name
-                        );
+                        if (!options.summary_only) {
+                            printf("\rDENTRY %#8" PRIx64 " || Node OID = %#9" PRIx64 " || XID = %#9" PRIx64 " || FileID = %#9" PRIx64 " || Name = %.*s\n",
+                                addr,
+                                node->btn_o.o_oid,
+                                node->btn_o.o_xid,
+                                val->file_id,
+                                name_len,
+                                key->name
+                            );
+                        }
                     }
                     if (options.export_stream && (options.list_all || has_name_filter || has_oid_filter)) {
                         export_dentry(options.export_stream, addr, node, key, val);
@@ -685,6 +718,7 @@ int cmd_search(int argc, char** argv) {
         }
     }
 
+    fprintf(stderr, "\n");
     printf("\n\nFinished search; found %" PRIu64 " results.\n\n", num_matches);
     if (options.export_stream) {
         fclose(options.export_stream);
