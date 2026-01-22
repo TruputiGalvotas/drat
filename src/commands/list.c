@@ -37,6 +37,8 @@ static bool name_equals(const uint8_t* name, uint16_t name_len, const char* quer
     return query_len == name_len && strncmp((const char*)name, query, name_len) == 0;
 }
 
+typedef struct options_t options_t;
+
 typedef struct {
     xid_t xid;
     char* name;
@@ -405,7 +407,7 @@ static xid_t find_snapshot_xid(btree_node_phys_t* fs_omap_btree, apfs_superblock
     return 0;
 }
 
-typedef struct {
+typedef struct options_t {
     int64_t fsoid;  // Needs to be `int64_t to work with `parse_number()`
     char* path;
     bool require_cksum;
