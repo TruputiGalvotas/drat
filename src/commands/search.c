@@ -17,6 +17,8 @@
 #include <apfs/dstream.h>
 #include <apfs/sibling.h>
 #include <apfs/snap.h>
+#include <apfs/sealed.h>
+#include <apfs/spaceman.h>
 
 #include <drat/argp.h>
 #include <drat/globals.h>
@@ -58,6 +60,9 @@ typedef struct {
     bool scan_virtual;
     bool summary_only;
     bool report;
+    bool use_spaceman_zones;
+    size_t num_scan_ranges;
+    oid_range_t* scan_ranges;
     size_t num_record_types;
     char** record_types;
     int64_t file_id;
@@ -91,6 +96,7 @@ typedef struct {
 #define DRAT_ARG_KEY_RECORD_TYPE        (DRAT_GLOBAL_ARGS_LAST_KEY - 14)
 #define DRAT_ARG_KEY_FILE_ID            (DRAT_GLOBAL_ARGS_LAST_KEY - 15)
 #define DRAT_ARG_KEY_REPORT             (DRAT_GLOBAL_ARGS_LAST_KEY - 16)
+#define DRAT_ARG_KEY_SPACEMAN_ZONES     (DRAT_GLOBAL_ARGS_LAST_KEY - 17)
 
 #define DRAT_ARG_ERR_INVALID_START              (DRAT_GLOBAL_ARGS_LAST_ERR - 1)
 #define DRAT_ARG_ERR_INVALID_END                (DRAT_GLOBAL_ARGS_LAST_ERR - 2)
@@ -103,6 +109,7 @@ typedef struct {
 #define DRAT_ARG_ERR_INVALID_EXPORT             (DRAT_GLOBAL_ARGS_LAST_ERR - 9)
 #define DRAT_ARG_ERR_INVALID_RECORD_TYPE        (DRAT_GLOBAL_ARGS_LAST_ERR - 10)
 #define DRAT_ARG_ERR_INVALID_FILE_ID            (DRAT_GLOBAL_ARGS_LAST_ERR - 11)
+#define DRAT_ARG_ERR_INVALID_SPACEMAN           (DRAT_GLOBAL_ARGS_LAST_ERR - 12)
 
 static const struct argp_option argp_options[] = {
     // char* name,       int key,                    char* arg,            int flags,   char* doc
@@ -119,9 +126,10 @@ static const struct argp_option argp_options[] = {
     { "matches-only",    DRAT_ARG_KEY_MATCHES_ONLY,  0,                    0,           "Only print matches (suppress full listing)" },
     { "export",          DRAT_ARG_KEY_EXPORT,         "path",               0,           "Write CSV results to the specified path" },
     { "summary",         DRAT_ARG_KEY_SUMMARY,        0,                    0,           "Only show progress and match counts (suppress match output)" },
-    { "record-type",     DRAT_ARG_KEY_RECORD_TYPE,    "type[,type...]",     0,           "Record types to include: dentry,file-extent,virtual,omap" },
+    { "record-type",     DRAT_ARG_KEY_RECORD_TYPE,    "type[,type...]",     0,           "Record types to include: dentry,file-extent,virtual,omap,snap-meta,snap-name,fext" },
     { "file-id",         DRAT_ARG_KEY_FILE_ID,        "file-id",            0,           "Filter by file ID (applies to dentries and file extents)" },
     { "report",          DRAT_ARG_KEY_REPORT,         0,                    0,           "Report file IDs and total extent sizes at end" },
+    { "spaceman-zones",  DRAT_ARG_KEY_SPACEMAN_ZONES, 0,                    0,           "Restrict scan to spaceman data zones" },
     {0}
 };
 
@@ -172,6 +180,13 @@ static bool add_range(oid_range_t** list, size_t* count, uint64_t start, uint64_
     *list = updated;
     (*count)++;
     return true;
+}
+
+static bool add_scan_range(options_t* options, uint64_t start, uint64_t end) {
+    if (end <= start) {
+        return true;
+    }
+    return add_range(&options->scan_ranges, &options->num_scan_ranges, start, end);
 }
 
 static bool add_token(char*** list, size_t* count, const char* value) {
@@ -276,7 +291,10 @@ static error_t parse_record_type_list(options_t* options, char* arg) {
                 if (strcasecmp(value, "dentry") != 0
                     && strcasecmp(value, "file-extent") != 0
                     && strcasecmp(value, "virtual") != 0
-                    && strcasecmp(value, "omap") != 0) {
+                    && strcasecmp(value, "omap") != 0
+                    && strcasecmp(value, "snap-meta") != 0
+                    && strcasecmp(value, "snap-name") != 0
+                    && strcasecmp(value, "fext") != 0) {
                     return DRAT_ARG_ERR_INVALID_RECORD_TYPE;
                 }
                 if (!add_token(&options->record_types, &options->num_record_types, value)) {
@@ -363,6 +381,9 @@ static error_t argp_parser(int key, char* arg, struct argp_state* state) {
             break;
         case DRAT_ARG_KEY_REPORT:
             options->report = true;
+            break;
+        case DRAT_ARG_KEY_SPACEMAN_ZONES:
+            options->use_spaceman_zones = true;
             break;
         case DRAT_ARG_KEY_EXPORT:
             if (!arg || !*arg) {
@@ -453,6 +474,41 @@ static void export_file_extent(FILE* stream, uint64_t block_addr, btree_node_phy
     );
 }
 
+static void export_snap_meta(FILE* stream, uint64_t block_addr, btree_node_phys_t* node, j_snap_metadata_val_t* val, uint64_t snap_id) {
+    fprintf(stream, "SNAP_META,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",",
+        block_addr,
+        node->btn_o.o_oid,
+        node->btn_o.o_xid,
+        snap_id
+    );
+    write_csv_field(stream, (const char*)val->name, val->name_len);
+    fprintf(stream, ",,,\n");
+}
+
+static void export_snap_name(FILE* stream, uint64_t block_addr, btree_node_phys_t* node, j_snap_name_key_t* key, j_snap_name_val_t* val, uint64_t snap_id) {
+    fprintf(stream, "SNAP_NAME,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",",
+        block_addr,
+        node->btn_o.o_oid,
+        node->btn_o.o_xid,
+        snap_id
+    );
+    write_csv_field(stream, (const char*)key->name, key->name_len);
+    fprintf(stream, ",%" PRIu64 ",,\n", (uint64_t)val->snap_xid);
+}
+
+static void export_fext(FILE* stream, uint64_t block_addr, btree_node_phys_t* node, fext_tree_key_t* key, fext_tree_val_t* val) {
+    uint64_t length_bytes = val->len_and_flags & J_FILE_EXTENT_LEN_MASK;
+    fprintf(stream, "FEXT,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",,%" PRIu64 ",%" PRIu64 ",%" PRIu64 "\n",
+        block_addr,
+        node->btn_o.o_oid,
+        node->btn_o.o_xid,
+        key->private_id,
+        key->logical_addr,
+        val->phys_block_num,
+        length_bytes
+    );
+}
+
 static int compare_extent_items(const void* a, const void* b) {
     const extent_item_t* left = a;
     const extent_item_t* right = b;
@@ -508,6 +564,9 @@ int cmd_search(int argc, char** argv) {
         .scan_virtual = false,
         .summary_only = false,
         .report = false,
+        .use_spaceman_zones = false,
+        .num_scan_ranges = 0,
+        .scan_ranges = NULL,
         .num_record_types = 0,
         .record_types = NULL,
         .file_id = -1,
@@ -561,10 +620,13 @@ int cmd_search(int argc, char** argv) {
                 fprintf(stderr, "%s: option `--export` has invalid value.\n", globals.program_name);
                 break;
             case DRAT_ARG_ERR_INVALID_RECORD_TYPE:
-                fprintf(stderr, "%s: option `--record-type` has invalid value; use dentry,file-extent,virtual,omap.\n", globals.program_name);
+                fprintf(stderr, "%s: option `--record-type` has invalid value; use dentry,file-extent,virtual,omap,snap-meta,snap-name,fext.\n", globals.program_name);
                 break;
             case DRAT_ARG_ERR_INVALID_FILE_ID:
                 fprintf(stderr, "%s: option `--file-id` has invalid value.\n", globals.program_name);
+                break;
+            case DRAT_ARG_ERR_INVALID_SPACEMAN:
+                fprintf(stderr, "%s: option `--spaceman-zones` failed to initialize spaceman ranges.\n", globals.program_name);
                 break;
             default:
                 print_arg_parse_error();
@@ -597,12 +659,16 @@ int cmd_search(int argc, char** argv) {
     }
 
     bool have_block_count = false;
+    bool have_nxsb = false;
     uint64_t num_blocks = 0;
+    nx_superblock_t nxsb_copy;
 
     printf("Reading block 0x0 to obtain block count ... ");
     if (read_blocks(block, 0x0, 1) == 1) {
         printf("OK.\n");
         if (is_nx_superblock(block) && ((nx_superblock_t*)block)->nx_magic == NX_MAGIC) {
+            memcpy(&nxsb_copy, block, sizeof(nxsb_copy));
+            have_nxsb = true;
             num_blocks = ((nx_superblock_t*)block)->nx_block_count;
             have_block_count = true;
         } else {
@@ -611,6 +677,69 @@ int cmd_search(int argc, char** argv) {
     } else {
         printf("FAILED.\n");
         printf("WARNING: Unable to read block 0x0. Scanning until end-of-container.\n");
+    }
+
+    if (options.use_spaceman_zones) {
+        if (!have_nxsb) {
+            fprintf(stderr, "WARNING: Spaceman zones requested, but no valid container superblock was found. Falling back to full scan.\n");
+            options.use_spaceman_zones = false;
+        } else {
+            spaceman_phys_t* spaceman = malloc(globals.block_size);
+            if (!spaceman) {
+                fprintf(stderr, "WARNING: Could not allocate memory for spaceman; falling back to full scan.\n");
+                options.use_spaceman_zones = false;
+            } else if (read_blocks(spaceman, nxsb_copy.nx_spaceman_oid, 1) != 1) {
+                fprintf(stderr, "WARNING: Failed to read spaceman at %#" PRIx64 "; falling back to full scan.\n", nxsb_copy.nx_spaceman_oid);
+                options.use_spaceman_zones = false;
+            } else if (options.require_cksum && !is_cksum_valid(spaceman)) {
+                fprintf(stderr, "WARNING: Spaceman checksum did not validate; falling back to full scan.\n");
+                options.use_spaceman_zones = false;
+            } else {
+                for (int dev = 0; dev < SD_COUNT; dev++) {
+                    for (int zone = 0; zone < SM_DATAZONE_ALLOCZONE_COUNT; zone++) {
+                        spaceman_allocation_zone_boundaries_t current = spaceman->sm_datazone.sdz_allocation_zones[dev][zone].saz_current_boundaries;
+                        if (current.saz_zone_end != SM_ALLOCZONE_INVALID_END_BOUNDARY) {
+                            uint64_t start = current.saz_zone_start;
+                            uint64_t end = current.saz_zone_end == UINT64_MAX ? UINT64_MAX : current.saz_zone_end + 1;
+                            if (have_block_count && end > num_blocks) {
+                                end = num_blocks;
+                            }
+                            if (options.start_addr != -1 && start < (uint64_t)options.start_addr) {
+                                start = (uint64_t)options.start_addr;
+                            }
+                            if (options.end_addr != -1 && end > (uint64_t)options.end_addr) {
+                                end = (uint64_t)options.end_addr;
+                            }
+                            add_scan_range(&options, start, end);
+                        }
+                        for (int prev = 0; prev < SM_ALLOCZONE_NUM_PREVIOUS_BOUNDARIES; prev++) {
+                            spaceman_allocation_zone_boundaries_t previous = spaceman->sm_datazone.sdz_allocation_zones[dev][zone].saz_previous_boundaries[prev];
+                            if (previous.saz_zone_end != SM_ALLOCZONE_INVALID_END_BOUNDARY) {
+                                uint64_t start = previous.saz_zone_start;
+                                uint64_t end = previous.saz_zone_end == UINT64_MAX ? UINT64_MAX : previous.saz_zone_end + 1;
+                                if (have_block_count && end > num_blocks) {
+                                    end = num_blocks;
+                                }
+                                if (options.start_addr != -1 && start < (uint64_t)options.start_addr) {
+                                    start = (uint64_t)options.start_addr;
+                                }
+                                if (options.end_addr != -1 && end > (uint64_t)options.end_addr) {
+                                    end = (uint64_t)options.end_addr;
+                                }
+                                add_scan_range(&options, start, end);
+                            }
+                        }
+                    }
+                }
+                if (options.num_scan_ranges == 0) {
+                    fprintf(stderr, "WARNING: No spaceman zones found; falling back to full scan.\n");
+                    options.use_spaceman_zones = false;
+                } else {
+                    fprintf(stderr, "Using spaceman zones: %zu ranges.\n", options.num_scan_ranges);
+                }
+            }
+            free(spaceman);
+        }
     }
 
     if (options.start_addr != -1 && options.end_addr != -1 && options.start_addr >= options.end_addr) {
@@ -629,6 +758,14 @@ int cmd_search(int argc, char** argv) {
         end_addr = UINT64_MAX;
     }
 
+    oid_range_t default_range = { start_addr, end_addr };
+    oid_range_t* ranges = &default_range;
+    size_t range_count = 1;
+    if (options.use_spaceman_zones && options.num_scan_ranges > 0) {
+        ranges = options.scan_ranges;
+        range_count = options.num_scan_ranges;
+    }
+
     if (have_block_count) {
         printf("The specified device has %" PRIu64 " = %#" PRIx64 " blocks. Commencing search:\n\n", num_blocks, num_blocks);
     } else {
@@ -636,7 +773,20 @@ int cmd_search(int argc, char** argv) {
     }
 
     uint64_t num_matches = 0;
-    uint64_t addr_range_size = (end_addr == UINT64_MAX) ? 0 : (end_addr - start_addr);
+    uint64_t total_blocks_to_scan = 0;
+    bool total_known = true;
+    for (size_t i = 0; i < range_count; i++) {
+        if (ranges[i].end == UINT64_MAX) {
+            total_known = false;
+            break;
+        }
+        if (ranges[i].end > ranges[i].start) {
+            total_blocks_to_scan += (ranges[i].end - ranges[i].start);
+        }
+    }
+    if (!total_known) {
+        total_blocks_to_scan = 0;
+    }
     extent_item_t* extent_items = NULL;
     size_t num_extent_items = 0;
 
@@ -645,50 +795,55 @@ int cmd_search(int argc, char** argv) {
     size_t spinner_index = 0;
     time_t start_time = time(NULL);
     time_t last_update = start_time;
+    uint64_t blocks_scanned = 0;
 
-    for (uint64_t addr = start_addr; addr < end_addr; addr++) {
-        time_t now = time(NULL);
-        if (addr == start_addr || now - last_update >= 1) {
-            last_update = now;
-            uint64_t blocks_scanned = addr - start_addr;
-            double elapsed = difftime(now, start_time);
-            double rate = elapsed > 0.0 ? (double)blocks_scanned / elapsed : 0.0;
-            if (addr_range_size > 0) {
-                double pct = 100.0 * (double)blocks_scanned / (double)addr_range_size;
-                double remaining = (rate > 0.0) ? (double)(addr_range_size - blocks_scanned) / rate : 0.0;
-                fprintf(stderr, "\r[%c] blocks: %" PRIu64 " / %" PRIu64 " (%6.2f%%) | %.1f blk/s | ETA %.0fs",
-                    spinner[spinner_index++ % 4],
-                    blocks_scanned,
-                    addr_range_size,
-                    pct,
-                    rate,
-                    remaining
-                );
-                if (options.summary_only) {
-                    fprintf(stderr, " | matches: %" PRIu64, num_matches);
+    for (size_t range_index = 0; range_index < range_count; range_index++) {
+        uint64_t range_start = ranges[range_index].start;
+        uint64_t range_end = ranges[range_index].end;
+        for (uint64_t addr = range_start; addr < range_end; addr++) {
+            time_t now = time(NULL);
+            if (blocks_scanned == 0 || now - last_update >= 1) {
+                last_update = now;
+                double elapsed = difftime(now, start_time);
+                double rate = elapsed > 0.0 ? (double)blocks_scanned / elapsed : 0.0;
+                if (total_blocks_to_scan > 0) {
+                    double pct = 100.0 * (double)blocks_scanned / (double)total_blocks_to_scan;
+                    double remaining = (rate > 0.0) ? (double)(total_blocks_to_scan - blocks_scanned) / rate : 0.0;
+                    fprintf(stderr, "\r[%c] blocks: %" PRIu64 " / %" PRIu64 " (%6.2f%%) | %.1f blk/s | ETA %.0fs",
+                        spinner[spinner_index++ % 4],
+                        blocks_scanned,
+                        total_blocks_to_scan,
+                        pct,
+                        rate,
+                        remaining
+                    );
+                    if (options.summary_only) {
+                        fprintf(stderr, " | matches: %" PRIu64, num_matches);
+                    }
+                } else {
+                    fprintf(stderr, "\r[%c] blocks scanned: %" PRIu64 " | %.1f blk/s",
+                        spinner[spinner_index++ % 4],
+                        blocks_scanned,
+                        rate
+                    );
+                    if (options.summary_only) {
+                        fprintf(stderr, " | matches: %" PRIu64, num_matches);
+                    }
                 }
-            } else {
-                fprintf(stderr, "\r[%c] blocks scanned: %" PRIu64 " | %.1f blk/s",
-                    spinner[spinner_index++ % 4],
-                    blocks_scanned,
-                    rate
-                );
-                if (options.summary_only) {
-                    fprintf(stderr, " | matches: %" PRIu64, num_matches);
-                }
-            }
-            fflush(stderr);
-        }
-
-        if (read_blocks(block, addr, 1) != 1) {
-            if (end_of_container()) {
-                printf("Reached end of container; search complete.\n");
-                break;
+                fflush(stderr);
             }
 
-            printf("WARNING: Failed to read block %#"PRIx64".\n", addr);
-            continue;
-        }
+            if (read_blocks(block, addr, 1) != 1) {
+                if (end_of_container()) {
+                    printf("Reached end of container; search complete.\n");
+                    range_index = range_count;
+                    break;
+                }
+
+                printf("WARNING: Failed to read block %#"PRIx64".\n", addr);
+                blocks_scanned++;
+                continue;
+            }
 
         bool checksum_ok = is_cksum_valid(block);
 
@@ -831,7 +986,8 @@ int cmd_search(int argc, char** argv) {
                     if (options.file_id != -1 && (uint64_t)options.file_id != (key->hdr.obj_id_and_type & OBJ_ID_MASK)) {
                         continue;
                     }
-                    if (options.export_stream) {
+                    num_matches++;
+                    if (options.export_stream && record_type_selected(&options, "file-extent")) {
                         export_file_extent(options.export_stream, addr, node, key, val);
                     }
                     if (options.report) {
@@ -851,6 +1007,7 @@ int cmd_search(int argc, char** argv) {
                     }
                 }
             }
+            blocks_scanned++;
         }
     }
 
@@ -891,6 +1048,204 @@ int cmd_search(int argc, char** argv) {
                 free(stats);
             }
         }
+
+        /** Scan snapshot metadata tree records **/
+        if (   is_btree_node_phys(block)
+            && is_snap_meta_tree(block)
+            && (record_type_selected(&options, "snap-meta") || record_type_selected(&options, "snap-name"))
+        ) {
+            btree_node_phys_t* node = block;
+            if (!(node->btn_flags & BTNODE_LEAF)) {
+                continue;
+            }
+
+            char* toc_start = (char*)node->btn_data + node->btn_table_space.off;
+            char* key_start = toc_start + node->btn_table_space.len;
+            char* val_end   = (char*)node + globals.block_size;
+            if (node->btn_flags & BTNODE_ROOT) {
+                val_end -= sizeof(btree_info_t);
+            }
+
+            if (node->btn_flags & BTNODE_FIXED_KV_SIZE) {
+                kvoff_t* toc_entry = toc_start;
+                for (uint32_t i = 0; i < node->btn_nkeys; i++, toc_entry++) {
+                    j_key_t* hdr = key_start + toc_entry->k;
+                    uint64_t snap_id = hdr->obj_id_and_type & OBJ_ID_MASK;
+                    if (options.file_id != -1 && (uint64_t)options.file_id != snap_id) {
+                        continue;
+                    }
+                    uint8_t record_type = (hdr->obj_id_and_type & OBJ_TYPE_MASK) >> OBJ_TYPE_SHIFT;
+                    if (record_type == APFS_TYPE_SNAP_METADATA && record_type_selected(&options, "snap-meta")) {
+                        j_snap_metadata_val_t* val = val_end - toc_entry->v;
+                        num_matches++;
+                        if (!options.summary_only) {
+                            printf("\rSNAP_META %#8" PRIx64 " || SnapID = %#9" PRIx64 " || Name = %.*s\n",
+                                addr,
+                                snap_id,
+                                val->name_len,
+                                val->name
+                            );
+                        }
+                        if (options.export_stream) {
+                            export_snap_meta(options.export_stream, addr, node, val, snap_id);
+                        }
+                    } else if (record_type == APFS_TYPE_SNAP_NAME && record_type_selected(&options, "snap-name")) {
+                        j_snap_name_key_t* key = (j_snap_name_key_t*)hdr;
+                        j_snap_name_val_t* val = val_end - toc_entry->v;
+                        num_matches++;
+                        if (!options.summary_only) {
+                            printf("\rSNAP_NAME %#8" PRIx64 " || SnapID = %#9" PRIx64 " || Name = %.*s || XID = %#" PRIx64 "\n",
+                                addr,
+                                snap_id,
+                                key->name_len,
+                                key->name,
+                                val->snap_xid
+                            );
+                        }
+                        if (options.export_stream) {
+                            export_snap_name(options.export_stream, addr, node, key, val, snap_id);
+                        }
+                    }
+                }
+            } else {
+                kvloc_t* toc_entry = toc_start;
+                for (uint32_t i = 0; i < node->btn_nkeys; i++, toc_entry++) {
+                    j_key_t* hdr = key_start + toc_entry->k.off;
+                    uint64_t snap_id = hdr->obj_id_and_type & OBJ_ID_MASK;
+                    if (options.file_id != -1 && (uint64_t)options.file_id != snap_id) {
+                        continue;
+                    }
+                    uint8_t record_type = (hdr->obj_id_and_type & OBJ_TYPE_MASK) >> OBJ_TYPE_SHIFT;
+                    if (record_type == APFS_TYPE_SNAP_METADATA && record_type_selected(&options, "snap-meta")) {
+                        j_snap_metadata_val_t* val = val_end - toc_entry->v.off;
+                        num_matches++;
+                        if (!options.summary_only) {
+                            printf("\rSNAP_META %#8" PRIx64 " || SnapID = %#9" PRIx64 " || Name = %.*s\n",
+                                addr,
+                                snap_id,
+                                val->name_len,
+                                val->name
+                            );
+                        }
+                        if (options.export_stream) {
+                            export_snap_meta(options.export_stream, addr, node, val, snap_id);
+                        }
+                    } else if (record_type == APFS_TYPE_SNAP_NAME && record_type_selected(&options, "snap-name")) {
+                        j_snap_name_key_t* key = (j_snap_name_key_t*)hdr;
+                        j_snap_name_val_t* val = val_end - toc_entry->v.off;
+                        num_matches++;
+                        if (!options.summary_only) {
+                            printf("\rSNAP_NAME %#8" PRIx64 " || SnapID = %#9" PRIx64 " || Name = %.*s || XID = %#" PRIx64 "\n",
+                                addr,
+                                snap_id,
+                                key->name_len,
+                                key->name,
+                                val->snap_xid
+                            );
+                        }
+                        if (options.export_stream) {
+                            export_snap_name(options.export_stream, addr, node, key, val, snap_id);
+                        }
+                    }
+                }
+            }
+        }
+
+        /** Scan fext tree records (sealed volumes) **/
+        if (   is_btree_node_phys(block)
+            && is_fext_tree(block)
+            && (record_type_selected(&options, "fext") || options.report)
+        ) {
+            btree_node_phys_t* node = block;
+            if (!(node->btn_flags & BTNODE_LEAF)) {
+                continue;
+            }
+
+            char* toc_start = (char*)node->btn_data + node->btn_table_space.off;
+            char* key_start = toc_start + node->btn_table_space.len;
+            char* val_end   = (char*)node + globals.block_size;
+            if (node->btn_flags & BTNODE_ROOT) {
+                val_end -= sizeof(btree_info_t);
+            }
+
+            if (node->btn_flags & BTNODE_FIXED_KV_SIZE) {
+                kvoff_t* toc_entry = toc_start;
+                for (uint32_t i = 0; i < node->btn_nkeys; i++, toc_entry++) {
+                    fext_tree_key_t* key = key_start + toc_entry->k;
+                    fext_tree_val_t* val = val_end - toc_entry->v;
+                    if (options.file_id != -1 && (uint64_t)options.file_id != key->private_id) {
+                        continue;
+                    }
+                    num_matches++;
+                    if (!options.summary_only && record_type_selected(&options, "fext")) {
+                        uint64_t length_bytes = val->len_and_flags & J_FILE_EXTENT_LEN_MASK;
+                        printf("\rFEXT %#8" PRIx64 " || FileID = %#9" PRIx64 " || Logical = %#" PRIx64 " || Phys = %#" PRIx64 " || Length = %" PRIu64 "\n",
+                            addr,
+                            key->private_id,
+                            key->logical_addr,
+                            val->phys_block_num,
+                            length_bytes
+                        );
+                    }
+                    if (options.export_stream && record_type_selected(&options, "fext")) {
+                        export_fext(options.export_stream, addr, node, key, val);
+                    }
+                    if (options.report) {
+                        uint64_t length_bytes = val->len_and_flags & J_FILE_EXTENT_LEN_MASK;
+                        extent_item_t item = {
+                            .file_id = key->private_id,
+                            .length_bytes = length_bytes,
+                        };
+                        extent_item_t* updated = realloc(extent_items, (num_extent_items + 1) * sizeof(*extent_items));
+                        if (!updated) {
+                            fprintf(stderr, "\nWARNING: Not enough memory to track extent stats; report will be incomplete.\n");
+                            options.report = false;
+                        } else {
+                            extent_items = updated;
+                            extent_items[num_extent_items++] = item;
+                        }
+                    }
+                }
+            } else {
+                kvloc_t* toc_entry = toc_start;
+                for (uint32_t i = 0; i < node->btn_nkeys; i++, toc_entry++) {
+                    fext_tree_key_t* key = key_start + toc_entry->k.off;
+                    fext_tree_val_t* val = val_end - toc_entry->v.off;
+                    if (options.file_id != -1 && (uint64_t)options.file_id != key->private_id) {
+                        continue;
+                    }
+                    num_matches++;
+                    if (!options.summary_only && record_type_selected(&options, "fext")) {
+                        uint64_t length_bytes = val->len_and_flags & J_FILE_EXTENT_LEN_MASK;
+                        printf("\rFEXT %#8" PRIx64 " || FileID = %#9" PRIx64 " || Logical = %#" PRIx64 " || Phys = %#" PRIx64 " || Length = %" PRIu64 "\n",
+                            addr,
+                            key->private_id,
+                            key->logical_addr,
+                            val->phys_block_num,
+                            length_bytes
+                        );
+                    }
+                    if (options.export_stream && record_type_selected(&options, "fext")) {
+                        export_fext(options.export_stream, addr, node, key, val);
+                    }
+                    if (options.report) {
+                        uint64_t length_bytes = val->len_and_flags & J_FILE_EXTENT_LEN_MASK;
+                        extent_item_t item = {
+                            .file_id = key->private_id,
+                            .length_bytes = length_bytes,
+                        };
+                        extent_item_t* updated = realloc(extent_items, (num_extent_items + 1) * sizeof(*extent_items));
+                        if (!updated) {
+                            fprintf(stderr, "\nWARNING: Not enough memory to track extent stats; report will be incomplete.\n");
+                            options.report = false;
+                        } else {
+                            extent_items = updated;
+                            extent_items[num_extent_items++] = item;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     printf("\n\nFinished search; found %" PRIu64 " results.\n\n", num_matches);
@@ -909,6 +1264,7 @@ int cmd_search(int argc, char** argv) {
     free(options.virtual_oids);
     free(options.omap_oid_ranges);
     free(options.record_types);
+    free(options.scan_ranges);
     free(extent_items);
     
     return 0;

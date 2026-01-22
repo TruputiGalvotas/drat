@@ -81,7 +81,7 @@ Commands:
     - `--dentry-name <name[,name...]>`: dentry name filters.
     - `--dentry-oid <oid[,oid...]>`: dentry file-id filters.
     - `--dentry-oid-range <start-end>`: dentry file-id ranges.
-    - `--record-type <type[,type...]>`: filter record types: `dentry`, `file-extent`, `virtual`, `omap`.
+    - `--record-type <type[,type...]>`: filter record types: `dentry`, `file-extent`, `virtual`, `omap`, `snap-meta`, `snap-name`, `fext`.
     - `--file-id <file-id>`: filter by file ID (dentries and file extents).
     - `--scan-omap`: scan omap leaf nodes.
     - `--omap-oid-range <start-end>`: omap OID ranges.
@@ -92,6 +92,7 @@ Commands:
     - `--summary`: only show progress and match counts (suppress match output).
     - `--export <path>`: write CSV results (see below).
     - `--report`: report total extent sizes by file ID.
+    - `--spaceman-zones`: restrict scanning to spaceman allocation zones.
   - Default behavior scans the whole container and prints dentries.
 
 - `recover`
@@ -117,6 +118,7 @@ Notes:
 - `modify` exists in the source tree but is currently disabled and not exposed as a command.
 - `search --export` writes CSV with columns:
   - `type,block_addr,node_oid,node_xid,file_id,name,logical_addr,phys_block,length_bytes`
+  - `type` can include `DENTRY`, `FILE_EXTENT`, `SNAP_META`, `SNAP_NAME`, `FEXT`.
 
 ### Compiling the software
 

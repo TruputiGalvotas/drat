@@ -78,3 +78,19 @@ bool is_omap_tree(obj_phys_t* obj) {
 bool is_fs_tree(obj_phys_t* obj) {
     return obj->o_subtype == OBJECT_TYPE_FSTREE;
 }
+
+/**
+ * Determine whether a given APFS object has the subtype corresponding to a
+ * snapshot metadata tree.
+ */
+bool is_snap_meta_tree(obj_phys_t* obj) {
+    return obj->o_subtype == OBJECT_TYPE_SNAPMETATREE;
+}
+
+/**
+ * Determine whether a given APFS object has the subtype corresponding to a
+ * fext tree (sealed volumes).
+ */
+bool is_fext_tree(obj_phys_t* obj) {
+    return obj->o_subtype == OBJECT_TYPE_FEXT_TREE;
+}

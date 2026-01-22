@@ -14,5 +14,7 @@ bool is_btree_node_phys_non_root(obj_phys_t* obj);
 bool is_btree_node_phys         (obj_phys_t* obj);
 bool is_omap_tree               (obj_phys_t* obj);
 bool is_fs_tree                 (obj_phys_t* obj);
+bool is_snap_meta_tree          (obj_phys_t* obj);
+bool is_fext_tree               (obj_phys_t* obj);
 
 #endif // DRAT_FUNC_BOOLEAN_H
