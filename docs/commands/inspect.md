@@ -4,15 +4,15 @@
 
 ## Description
 
-The {drat-command}`inspect` command inspects all aspects of an APFS container,
-primarily by simulating the process of mounting it. It displays info about the
-inspection process, reporting info, warnings, and errors about the container's
-state.
+The {drat-command}`inspect` command inspects an APFS container by simulating
+the process of mounting it. By default it prints a concise, human-readable size
+summary; use `--verbose` to display the full inspection details, warnings, and
+errors about the container's state.
 
 ## Example usage and output
 
 ```
-$ drat --container /dev/disk2s2 inspect
+$ drat --container /dev/disk2s2 inspect --verbose
 
 Opening file at `/dev/disk2s2` in read-only mode ... OK.
 Simulating a mount of the APFS container.

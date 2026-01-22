@@ -35,13 +35,16 @@
 
 typedef struct {
     bool require_cksum;
+    bool verbose;
 } options_t;
 
 #define DRAT_ARG_KEY_NO_CKSUM   (DRAT_GLOBAL_ARGS_LAST_KEY - 1)
+#define DRAT_ARG_KEY_VERBOSE    (DRAT_GLOBAL_ARGS_LAST_KEY - 2)
 
 static const struct argp_option argp_options[] = {
     // char* name,      int key,               char* arg,  int flags,  char* doc
     { "no-cksum",       DRAT_ARG_KEY_NO_CKSUM, 0,          0,          "Do not require checksum validation" },
+    { "verbose",        DRAT_ARG_KEY_VERBOSE,  0,          0,          "Show detailed APFS metadata output" },
     {0}
 };
 
@@ -52,6 +55,9 @@ static error_t argp_parser(int key, char* arg, struct argp_state* state) {
     switch (key) {
         case DRAT_ARG_KEY_NO_CKSUM:
             options->require_cksum = false;
+            break;
+        case DRAT_ARG_KEY_VERBOSE:
+            options->verbose = true;
             break;
         case ARGP_KEY_END:
             return 0;
@@ -74,8 +80,8 @@ static const struct argp argp = {
 static void print_usage(FILE* stream) {
     fprintf(
         stream,
-        "Usage:   %1$s %2$s --container <container> [options]\n"
-        "Example: %1$s %2$s --container /dev/disk0s2 --no-cksum\n",
+        "Usage:   %1$s %2$s --container <container> [--verbose] [--no-cksum]\n"
+        "Example: %1$s %2$s --container /dev/disk0s2 --verbose --no-cksum\n",
         globals.program_name,
         globals.command_name
     );
@@ -92,6 +98,172 @@ static void format_bytes_human(uint64_t bytes, char* buffer, size_t buffer_len) 
     snprintf(buffer, buffer_len, "%.2f %s", value, units[unit_index]);
 }
 
+static int cmd_inspect_summary(const options_t* options) {
+    nx_superblock_t* nxsb = malloc(globals.block_size);
+    if (!nxsb) {
+        fprintf(stderr, "ABORT: Could not allocate sufficient memory for `nxsb`.\n");
+        return -1;
+    }
+    if (read_blocks(nxsb, 0, 1) != 1) {
+        fprintf(stderr, "ABORT: Failed to successfully read block 0.\n");
+        free(nxsb);
+        return -1;
+    }
+    if (options->require_cksum && !is_cksum_valid(nxsb)) {
+        fprintf(stderr, "WARNING: Checksum of block 0x0 did not validate; proceeding anyway.\n");
+    }
+    if (!is_nx_superblock(nxsb) || nxsb->nx_magic != NX_MAGIC) {
+        fprintf(stderr, "WARNING: Block 0x0 does not appear to be a valid container superblock; proceeding anyway.\n");
+    }
+
+    uint32_t xp_desc_blocks = nxsb->nx_xp_desc_blocks & ~(1 << 31);
+    if (nxsb->nx_xp_desc_blocks >> 31) {
+        fprintf(stderr, "WARNING: Checkpoint descriptor area is a B-tree; using block 0x0 superblock.\n");
+    } else if (xp_desc_blocks > 0) {
+        char (*xp_desc)[globals.block_size] = malloc(xp_desc_blocks * globals.block_size);
+        if (!xp_desc) {
+            fprintf(stderr, "ABORT: Could not allocate sufficient memory for %"PRIu32" blocks.\n", xp_desc_blocks);
+            free(nxsb);
+            return -1;
+        }
+        if (read_blocks(xp_desc, nxsb->nx_xp_desc_base, xp_desc_blocks) != xp_desc_blocks) {
+            fprintf(stderr, "WARNING: Failed to read all blocks in the checkpoint descriptor area; using block 0x0 superblock.\n");
+            free(xp_desc);
+        } else {
+            uint32_t i_latest_nx = 0;
+            xid_t xid_latest_nx = 0;
+            xid_t max_xid = ~0;
+
+            for (uint32_t i = 0; i < xp_desc_blocks; i++) {
+                if (!is_cksum_valid(xp_desc[i]) && options->require_cksum) {
+                    continue;
+                }
+                if (is_nx_superblock(xp_desc[i])) {
+                    if ( ((nx_superblock_t*)xp_desc[i])->nx_magic  !=  NX_MAGIC ) {
+                        continue;
+                    }
+                    xid_t nx_xid = ((nx_superblock_t*)xp_desc[i])->nx_o.o_xid;
+                    if ( (nx_xid > xid_latest_nx) && (nx_xid <= max_xid) ) {
+                        i_latest_nx = i;
+                        xid_latest_nx = nx_xid;
+                    }
+                }
+            }
+            if (xid_latest_nx != 0) {
+                memcpy(nxsb, xp_desc[i_latest_nx], sizeof(nx_superblock_t));
+            }
+            free(xp_desc);
+        }
+    }
+
+    omap_phys_t* nx_omap = malloc(globals.block_size);
+    if (!nx_omap) {
+        fprintf(stderr, "ABORT: Could not allocate sufficient memory for `nx_omap`.\n");
+        free(nxsb);
+        return -1;
+    }
+    if (read_blocks(nx_omap, nxsb->nx_omap_oid, 1) != 1) {
+        fprintf(stderr, "ABORT: Failed to read container object map.\n");
+        free(nx_omap);
+        free(nxsb);
+        return -1;
+    }
+    if (options->require_cksum && !is_cksum_valid(nx_omap)) {
+        fprintf(stderr, "WARNING: Container object map checksum did not validate; proceeding anyway.\n");
+    }
+    if ((nx_omap->om_tree_type & OBJ_STORAGETYPE_MASK) != OBJ_PHYSICAL) {
+        fprintf(stderr, "ABORT: Container object map is not a Physical object.\n");
+        free(nx_omap);
+        free(nxsb);
+        return -1;
+    }
+
+    btree_node_phys_t* nx_omap_btree = malloc(globals.block_size);
+    if (!nx_omap_btree) {
+        fprintf(stderr, "ABORT: Could not allocate sufficient memory for `nx_omap_btree`.\n");
+        free(nx_omap);
+        free(nxsb);
+        return -1;
+    }
+    if (read_blocks(nx_omap_btree, nx_omap->om_tree_oid, 1) != 1) {
+        fprintf(stderr, "ABORT: Failed to read container omap B-tree root.\n");
+        free(nx_omap_btree);
+        free(nx_omap);
+        free(nxsb);
+        return -1;
+    }
+    if (options->require_cksum && !is_cksum_valid(nx_omap_btree)) {
+        fprintf(stderr, "WARNING: Container omap B-tree checksum did not validate; proceeding anyway.\n");
+    }
+
+    uint32_t num_file_systems = 0;
+    for (uint32_t i = 0; i < NX_MAX_FILE_SYSTEMS; i++) {
+        if (nxsb->nx_fs_oid[i] == 0) {
+            break;
+        }
+        num_file_systems++;
+    }
+
+    char (*apsbs)[globals.block_size] = NULL;
+    if (num_file_systems > 0) {
+        apsbs = malloc(globals.block_size * num_file_systems);
+        if (!apsbs) {
+            fprintf(stderr, "ABORT: Could not allocate sufficient memory for `apsbs`.\n");
+            free(nx_omap_btree);
+            free(nx_omap);
+            free(nxsb);
+            return -1;
+        }
+        for (uint32_t i = 0; i < num_file_systems; i++) {
+            omap_entry_t* fs_entry = get_btree_phys_omap_entry(nx_omap_btree, nxsb->nx_fs_oid[i], nxsb->nx_o.o_xid);
+            if (!fs_entry) {
+                fprintf(stderr, "ABORT: No objects with Virtual OID %#"PRIx64" exist in container omap.\n", nxsb->nx_fs_oid[i]);
+                free(apsbs);
+                free(nx_omap_btree);
+                free(nx_omap);
+                free(nxsb);
+                return -1;
+            }
+            if (read_blocks(apsbs + i, fs_entry->val.ov_paddr, 1) != 1) {
+                fprintf(stderr, "ABORT: Failed to read volume superblock at %#"PRIx64".\n", fs_entry->val.ov_paddr);
+                free(fs_entry);
+                free(apsbs);
+                free(nx_omap_btree);
+                free(nx_omap);
+                free(nxsb);
+                return -1;
+            }
+            free(fs_entry);
+            if (options->require_cksum && !is_cksum_valid(apsbs + i)) {
+                fprintf(stderr, "WARNING: Volume superblock checksum did not validate; proceeding anyway.\n");
+            }
+        }
+    }
+
+    uint64_t container_total_bytes = nxsb->nx_block_count * (uint64_t)globals.block_size;
+    char container_total_human[32];
+    format_bytes_human(container_total_bytes, container_total_human, sizeof(container_total_human));
+    printf("Container total: %s\n", container_total_human);
+
+    for (uint32_t i = 0; i < num_file_systems; i++) {
+        apfs_superblock_t* apsb = (apfs_superblock_t*)(apsbs + i);
+        uint64_t volume_used_bytes = apsb->apfs_fs_alloc_count * (uint64_t)globals.block_size;
+        char volume_used_human[32];
+        char volname[APFS_VOLNAME_LEN + 1];
+        memcpy(volname, apsb->apfs_volname, APFS_VOLNAME_LEN);
+        volname[APFS_VOLNAME_LEN] = '\0';
+        format_bytes_human(volume_used_bytes, volume_used_human, sizeof(volume_used_human));
+        printf("Volume %u (%s) allocated: %s\n", i, volname, volume_used_human);
+    }
+
+    free(apsbs);
+    free(nx_omap_btree);
+    free(nx_omap);
+    free(nxsb);
+    close_container();
+    return 0;
+}
+
 int cmd_inspect(int argc, char** argv) {
     if (argc == 2) {
         // Command was specified with no other arguments
@@ -101,6 +273,7 @@ int cmd_inspect(int argc, char** argv) {
 
     options_t options = {
         .require_cksum = true,
+        .verbose = false,
     };
 
     // Parse global and command options
@@ -123,6 +296,10 @@ int cmd_inspect(int argc, char** argv) {
 
     if (open_container() != 0) {
         return EX_NOINPUT;
+    }
+
+    if (!options.verbose) {
+        return cmd_inspect_summary(&options);
     }
 
     printf("Simulating a mount of the container.\n");

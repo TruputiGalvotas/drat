@@ -44,7 +44,7 @@ Global options:
 Commands:
 
 - `inspect`
-  - Usage: `drat inspect --container <container> [--no-cksum]`
+  - Usage: `drat inspect --container <container> [--verbose] [--no-cksum]`
   - Prints container and checkpoint metadata.
 
 - `read`
