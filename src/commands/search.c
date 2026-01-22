@@ -1007,8 +1007,9 @@ int cmd_search(int argc, char** argv) {
                     }
                 }
             }
+        }
 
-            /** Scan snapshot metadata tree records **/
+        /** Scan snapshot metadata tree records **/
             if (   is_btree_node_phys(block)
                 && is_snap_meta_tree(block)
                 && (record_type_selected(&options, "snap-meta") || record_type_selected(&options, "snap-name"))
