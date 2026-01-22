@@ -16,6 +16,7 @@
 #include <apfs/dstream.h>
 #include <apfs/sibling.h>
 #include <apfs/snap.h>
+#include <apfs/spaceman.h>
 
 #include <drat/globals.h>
 #include <drat/argp.h>
@@ -78,6 +79,17 @@ static void print_usage(FILE* stream) {
         globals.program_name,
         globals.command_name
     );
+}
+
+static void format_bytes_human(uint64_t bytes, char* buffer, size_t buffer_len) {
+    const char* units[] = {"B", "KB", "MB", "GB", "TB", "PB"};
+    size_t unit_index = 0;
+    double value = (double)bytes;
+    while (value >= 1000.0 && unit_index < (sizeof(units) / sizeof(units[0]) - 1)) {
+        value /= 1000.0;
+        unit_index++;
+    }
+    snprintf(buffer, buffer_len, "%.2f %s", value, units[unit_index]);
 }
 
 int cmd_inspect(int argc, char** argv) {
@@ -149,6 +161,59 @@ int cmd_inspect(int argc, char** argv) {
     }
 
     printf("Locating the checkpoint descriptor area:\n");
+
+    printf("\nReading container spaceman ... ");
+    spaceman_phys_t* spaceman = malloc(globals.block_size);
+    if (!spaceman) {
+        fprintf(stderr, "\nABORT: Could not allocate sufficient memory for `spaceman`.\n");
+        return -1;
+    }
+    if (read_blocks(spaceman, nxsb->nx_spaceman_oid, 1) != 1) {
+        printf("FAILED.\n");
+        fprintf(stderr, "WARNING: Failed to read spaceman at %#" PRIx64 ".\n", nxsb->nx_spaceman_oid);
+        free(spaceman);
+    } else {
+        if (options.require_cksum && !is_cksum_valid(spaceman)) {
+            printf("FAILED.\n");
+            fprintf(stderr, "WARNING: Spaceman checksum did not validate; skipping usage stats.\n");
+            free(spaceman);
+        } else {
+            if (!options.require_cksum) {
+                printf("OK (checksum skipped).\n");
+            } else {
+                printf("OK.\n");
+            }
+
+            printf("Container usage estimates (from spaceman):\n");
+            for (int dev = 0; dev < SD_COUNT; dev++) {
+                spaceman_device_t* sm_dev = &spaceman->sm_dev[dev];
+                if (sm_dev->sm_block_count == 0) {
+                    continue;
+                }
+                uint64_t total_bytes = sm_dev->sm_block_count * (uint64_t)globals.block_size;
+                uint64_t free_bytes = sm_dev->sm_free_count * (uint64_t)globals.block_size;
+                uint64_t used_bytes = total_bytes - free_bytes;
+                char total_human[32];
+                char used_human[32];
+                char free_human[32];
+                format_bytes_human(total_bytes, total_human, sizeof(total_human));
+                format_bytes_human(used_bytes, used_human, sizeof(used_human));
+                format_bytes_human(free_bytes, free_human, sizeof(free_human));
+                printf(
+                    "- Device %d: total=%" PRIu64 " bytes (%s), used=%" PRIu64 " bytes (%s), free=%" PRIu64 " bytes (%s)\n",
+                    dev,
+                    total_bytes,
+                    total_human,
+                    used_bytes,
+                    used_human,
+                    free_bytes
+                    , free_human
+                );
+            }
+            printf("\n");
+            free(spaceman);
+        }
+    }
     
     uint32_t xp_desc_blocks = nxsb->nx_xp_desc_blocks & ~(1 << 31);
     printf("- Its length is %"PRIu32" blocks.\n", xp_desc_blocks);
