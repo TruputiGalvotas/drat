@@ -97,6 +97,7 @@ Commands:
     - `--report`: report total extent sizes by file ID.
     - `--spaceman-zones`: restrict scanning to spaceman allocation zones.
     - `--resolve-names`: try to map file IDs to names and include them in reports/exports.
+    - `--unique-files`: export only the first occurrence per file ID.
   - Default behavior scans the whole container and prints dentries.
 
 - `recover`
