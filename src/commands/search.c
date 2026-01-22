@@ -42,6 +42,11 @@ typedef struct {
 
 typedef struct {
     uint64_t file_id;
+    char* name;
+} name_map_t;
+
+typedef struct {
+    uint64_t file_id;
     uint64_t length_bytes;
 } extent_item_t;
 
@@ -61,6 +66,7 @@ typedef struct {
     bool summary_only;
     bool report;
     bool use_spaceman_zones;
+    bool resolve_names;
     size_t num_scan_ranges;
     oid_range_t* scan_ranges;
     size_t num_record_types;
@@ -97,6 +103,7 @@ typedef struct {
 #define DRAT_ARG_KEY_FILE_ID            (DRAT_GLOBAL_ARGS_LAST_KEY - 15)
 #define DRAT_ARG_KEY_REPORT             (DRAT_GLOBAL_ARGS_LAST_KEY - 16)
 #define DRAT_ARG_KEY_SPACEMAN_ZONES     (DRAT_GLOBAL_ARGS_LAST_KEY - 17)
+#define DRAT_ARG_KEY_RESOLVE_NAMES      (DRAT_GLOBAL_ARGS_LAST_KEY - 18)
 
 #define DRAT_ARG_ERR_INVALID_START              (DRAT_GLOBAL_ARGS_LAST_ERR - 1)
 #define DRAT_ARG_ERR_INVALID_END                (DRAT_GLOBAL_ARGS_LAST_ERR - 2)
@@ -130,6 +137,7 @@ static const struct argp_option argp_options[] = {
     { "file-id",         DRAT_ARG_KEY_FILE_ID,        "file-id",            0,           "Filter by file ID (applies to dentries and file extents)" },
     { "report",          DRAT_ARG_KEY_REPORT,         0,                    0,           "Report file IDs and total extent sizes at end" },
     { "spaceman-zones",  DRAT_ARG_KEY_SPACEMAN_ZONES, 0,                    0,           "Restrict scan to spaceman data zones" },
+    { "resolve-names",   DRAT_ARG_KEY_RESOLVE_NAMES,  0,                    0,           "Resolve file IDs to names when possible" },
     {0}
 };
 
@@ -385,6 +393,9 @@ static error_t argp_parser(int key, char* arg, struct argp_state* state) {
         case DRAT_ARG_KEY_SPACEMAN_ZONES:
             options->use_spaceman_zones = true;
             break;
+        case DRAT_ARG_KEY_RESOLVE_NAMES:
+            options->resolve_names = true;
+            break;
         case DRAT_ARG_KEY_EXPORT:
             if (!arg || !*arg) {
                 return DRAT_ARG_ERR_INVALID_EXPORT;
@@ -461,13 +472,18 @@ static void export_dentry(FILE* stream, uint64_t block_addr, btree_node_phys_t* 
     fprintf(stream, ",,,\n");
 }
 
-static void export_file_extent(FILE* stream, uint64_t block_addr, btree_node_phys_t* node, j_file_extent_key_t* key, j_file_extent_val_t* val) {
+static void export_file_extent(FILE* stream, uint64_t block_addr, btree_node_phys_t* node, j_file_extent_key_t* key, j_file_extent_val_t* val, const char* name, size_t name_len) {
     uint64_t length_bytes = val->len_and_flags & J_FILE_EXTENT_LEN_MASK;
-    fprintf(stream, "FILE_EXTENT,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",,%" PRIu64 ",%" PRIu64 ",%" PRIu64 "\n",
+    fprintf(stream, "FILE_EXTENT,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",",
         block_addr,
         node->btn_o.o_oid,
         node->btn_o.o_xid,
-        key->hdr.obj_id_and_type & OBJ_ID_MASK,
+        key->hdr.obj_id_and_type & OBJ_ID_MASK
+    );
+    if (name && name_len > 0) {
+        write_csv_field(stream, name, name_len);
+    }
+    fprintf(stream, ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 "\n",
         key->logical_addr,
         val->phys_block_num,
         length_bytes
@@ -507,6 +523,56 @@ static void export_fext(FILE* stream, uint64_t block_addr, btree_node_phys_t* no
         val->phys_block_num,
         length_bytes
     );
+}
+
+static const char* lookup_name(const name_map_t* map, size_t count, uint64_t file_id, size_t* name_len) {
+    for (size_t i = 0; i < count; i++) {
+        if (map[i].file_id == file_id) {
+            if (name_len) {
+                *name_len = strlen(map[i].name);
+            }
+            return map[i].name;
+        }
+    }
+    if (name_len) {
+        *name_len = 0;
+    }
+    return NULL;
+}
+
+static bool add_name_mapping(name_map_t** map, size_t* count, uint64_t file_id, const char* name, size_t name_len) {
+    for (size_t i = 0; i < *count; i++) {
+        if ((*map)[i].file_id == file_id) {
+            if (strlen((*map)[i].name) >= name_len) {
+                return true;
+            }
+            char* copy = malloc(name_len + 1);
+            if (!copy) {
+                return false;
+            }
+            memcpy(copy, name, name_len);
+            copy[name_len] = '\0';
+            free((*map)[i].name);
+            (*map)[i].name = copy;
+            return true;
+        }
+    }
+    char* copy = malloc(name_len + 1);
+    if (!copy) {
+        return false;
+    }
+    memcpy(copy, name, name_len);
+    copy[name_len] = '\0';
+    name_map_t* updated = realloc(*map, (*count + 1) * sizeof(**map));
+    if (!updated) {
+        free(copy);
+        return false;
+    }
+    updated[*count].file_id = file_id;
+    updated[*count].name = copy;
+    *map = updated;
+    (*count)++;
+    return true;
 }
 
 static int compare_extent_items(const void* a, const void* b) {
@@ -565,6 +631,7 @@ int cmd_search(int argc, char** argv) {
         .summary_only = false,
         .report = false,
         .use_spaceman_zones = false,
+        .resolve_names = false,
         .num_scan_ranges = 0,
         .scan_ranges = NULL,
         .num_record_types = 0,
@@ -789,6 +856,8 @@ int cmd_search(int argc, char** argv) {
     }
     extent_item_t* extent_items = NULL;
     size_t num_extent_items = 0;
+    name_map_t* name_map = NULL;
+    size_t num_name_map = 0;
 
     /** Search over all blocks **/
     const char spinner[] = "|/-\\";
@@ -980,6 +1049,13 @@ int cmd_search(int argc, char** argv) {
                     if (options.export_stream && (options.list_all || has_name_filter || has_oid_filter)) {
                         export_dentry(options.export_stream, addr, node, key, val);
                     }
+                    if (options.resolve_names && name_ok && oid_ok) {
+                        uint16_t name_len = key->name_len_and_hash & J_DREC_LEN_MASK;
+                        if (!add_name_mapping(&name_map, &num_name_map, val->file_id, (const char*)key->name, name_len)) {
+                            fprintf(stderr, "\nWARNING: Not enough memory to store name mappings; continuing without more names.\n");
+                            options.resolve_names = false;
+                        }
+                    }
                 } else if (record_type == APFS_TYPE_FILE_EXTENT && (record_type_selected(&options, "file-extent") || options.report)) {
                     j_file_extent_key_t* key = hdr;
                     j_file_extent_val_t* val = val_end - toc_entry->v.off;
@@ -988,7 +1064,12 @@ int cmd_search(int argc, char** argv) {
                     }
                     num_matches++;
                     if (options.export_stream && record_type_selected(&options, "file-extent")) {
-                        export_file_extent(options.export_stream, addr, node, key, val);
+                        size_t name_len = 0;
+                        const char* name = NULL;
+                        if (options.resolve_names) {
+                            name = lookup_name(name_map, num_name_map, key->hdr.obj_id_and_type & OBJ_ID_MASK, &name_len);
+                        }
+                        export_file_extent(options.export_stream, addr, node, key, val, name, name_len);
                     }
                     if (options.report) {
                         uint64_t length_bytes = val->len_and_flags & J_FILE_EXTENT_LEN_MASK;
@@ -1241,9 +1322,22 @@ int cmd_search(int argc, char** argv) {
 
                 qsort(stats, num_stats, sizeof(*stats), compare_extent_stats_by_total);
                 printf("\nReport: file extents by file ID (sorted by total bytes)\n");
-                printf("file_id,total_bytes,num_extents\n");
+                if (options.resolve_names) {
+                    printf("file_id,name,total_bytes,num_extents\n");
+                } else {
+                    printf("file_id,total_bytes,num_extents\n");
+                }
                 for (size_t i = 0; i < num_stats; i++) {
-                    printf("%#" PRIx64 ",%" PRIu64 ",%" PRIu64 "\n", stats[i].file_id, stats[i].total_bytes, stats[i].num_extents);
+                    if (options.resolve_names) {
+                        size_t name_len = 0;
+                        const char* name = lookup_name(name_map, num_name_map, stats[i].file_id, &name_len);
+                        if (!name) {
+                            name = "";
+                        }
+                        printf("%#" PRIx64 ",%s,%" PRIu64 ",%" PRIu64 "\n", stats[i].file_id, name, stats[i].total_bytes, stats[i].num_extents);
+                    } else {
+                        printf("%#" PRIx64 ",%" PRIu64 ",%" PRIu64 "\n", stats[i].file_id, stats[i].total_bytes, stats[i].num_extents);
+                    }
                 }
                 free(stats);
             }
@@ -1269,6 +1363,10 @@ int cmd_search(int argc, char** argv) {
     free(options.record_types);
     free(options.scan_ranges);
     free(extent_items);
+    for (size_t i = 0; i < num_name_map; i++) {
+        free(name_map[i].name);
+    }
+    free(name_map);
     
     return 0;
 }
