@@ -66,6 +66,9 @@ Commands:
   - Lists directory entries or file metadata by FSOID or path.
   - Options:
     - `--no-cksum`: skip checksum validation during tree traversal.
+    - `--snapshot-xid <xid>`: list files as of the snapshot at the given XID.
+    - `--snapshot-name <name>`: list files as of the snapshot with the given name.
+    - `--all-snapshots`: list the entrypoint across all snapshots.
 
 - `resolver`
   - Usage: `drat resolver --container <container> --volume <volume index> --oids <oid[,oid...]>`
