@@ -460,6 +460,17 @@ static void write_csv_field(FILE* stream, const char* data, size_t len) {
     fputc('"', stream);
 }
 
+static void format_bytes_decimal(uint64_t bytes, char* buffer, size_t buffer_len) {
+    const char* units[] = {"B", "KB", "MB", "GB", "TB", "PB"};
+    size_t unit_index = 0;
+    double value = (double)bytes;
+    while (value >= 1000.0 && unit_index < (sizeof(units) / sizeof(units[0]) - 1)) {
+        value /= 1000.0;
+        unit_index++;
+    }
+    snprintf(buffer, buffer_len, "%.2f %s", value, units[unit_index]);
+}
+
 static void export_dentry(FILE* stream, uint64_t block_addr, btree_node_phys_t* node, j_drec_hashed_key_t* key, j_drec_val_t* val) {
     uint16_t name_len = key->name_len_and_hash & J_DREC_LEN_MASK;
     fprintf(stream, "DENTRY,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",",
@@ -469,11 +480,13 @@ static void export_dentry(FILE* stream, uint64_t block_addr, btree_node_phys_t* 
         val->file_id
     );
     write_csv_field(stream, (const char*)key->name, name_len);
-    fprintf(stream, ",,,\n");
+    fprintf(stream, ",,,,\n");
 }
 
 static void export_file_extent(FILE* stream, uint64_t block_addr, btree_node_phys_t* node, j_file_extent_key_t* key, j_file_extent_val_t* val, const char* name, size_t name_len) {
     uint64_t length_bytes = val->len_and_flags & J_FILE_EXTENT_LEN_MASK;
+    char length_human[32];
+    format_bytes_decimal(length_bytes, length_human, sizeof(length_human));
     fprintf(stream, "FILE_EXTENT,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",",
         block_addr,
         node->btn_o.o_oid,
@@ -483,10 +496,11 @@ static void export_file_extent(FILE* stream, uint64_t block_addr, btree_node_phy
     if (name && name_len > 0) {
         write_csv_field(stream, name, name_len);
     }
-    fprintf(stream, ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 "\n",
+    fprintf(stream, ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%s\n",
         key->logical_addr,
         val->phys_block_num,
-        length_bytes
+        length_bytes,
+        length_human
     );
 }
 
@@ -498,7 +512,7 @@ static void export_snap_meta(FILE* stream, uint64_t block_addr, btree_node_phys_
         snap_id
     );
     write_csv_field(stream, (const char*)val->name, val->name_len);
-    fprintf(stream, ",,,\n");
+    fprintf(stream, ",,,,\n");
 }
 
 static void export_snap_name(FILE* stream, uint64_t block_addr, btree_node_phys_t* node, j_snap_name_key_t* key, j_snap_name_val_t* val, uint64_t snap_id) {
@@ -509,19 +523,22 @@ static void export_snap_name(FILE* stream, uint64_t block_addr, btree_node_phys_
         snap_id
     );
     write_csv_field(stream, (const char*)key->name, key->name_len);
-    fprintf(stream, ",%" PRIu64 ",,\n", (uint64_t)val->snap_xid);
+    fprintf(stream, ",%" PRIu64 ",,,\n", (uint64_t)val->snap_xid);
 }
 
 static void export_fext(FILE* stream, uint64_t block_addr, btree_node_phys_t* node, fext_tree_key_t* key, fext_tree_val_t* val) {
     uint64_t length_bytes = val->len_and_flags & J_FILE_EXTENT_LEN_MASK;
-    fprintf(stream, "FEXT,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",,%" PRIu64 ",%" PRIu64 ",%" PRIu64 "\n",
+    char length_human[32];
+    format_bytes_decimal(length_bytes, length_human, sizeof(length_human));
+    fprintf(stream, "FEXT,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%s\n",
         block_addr,
         node->btn_o.o_oid,
         node->btn_o.o_xid,
         key->private_id,
         key->logical_addr,
         val->phys_block_num,
-        length_bytes
+        length_bytes,
+        length_human
     );
 }
 
@@ -716,7 +733,7 @@ int cmd_search(int argc, char** argv) {
             close_container();
             return EX_CANTCREAT;
         }
-        fprintf(options.export_stream, "type,block_addr,node_oid,node_xid,file_id,name,logical_addr,phys_block,length_bytes\n");
+        fprintf(options.export_stream, "type,block_addr,node_oid,node_xid,file_id,name,logical_addr,phys_block,length_bytes,length_human\n");
     }
 
     obj_phys_t* block = malloc(globals.block_size);
