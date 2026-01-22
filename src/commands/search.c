@@ -1007,6 +1007,205 @@ int cmd_search(int argc, char** argv) {
                     }
                 }
             }
+
+            /** Scan snapshot metadata tree records **/
+            if (   is_btree_node_phys(block)
+                && is_snap_meta_tree(block)
+                && (record_type_selected(&options, "snap-meta") || record_type_selected(&options, "snap-name"))
+            ) {
+                btree_node_phys_t* node = block;
+                if (!(node->btn_flags & BTNODE_LEAF)) {
+                    continue;
+                }
+
+                char* toc_start = (char*)node->btn_data + node->btn_table_space.off;
+                char* key_start = toc_start + node->btn_table_space.len;
+                char* val_end   = (char*)node + globals.block_size;
+                if (node->btn_flags & BTNODE_ROOT) {
+                    val_end -= sizeof(btree_info_t);
+                }
+
+                if (node->btn_flags & BTNODE_FIXED_KV_SIZE) {
+                    kvoff_t* toc_entry = toc_start;
+                    for (uint32_t i = 0; i < node->btn_nkeys; i++, toc_entry++) {
+                        j_key_t* hdr = key_start + toc_entry->k;
+                        uint64_t snap_id = hdr->obj_id_and_type & OBJ_ID_MASK;
+                        if (options.file_id != -1 && (uint64_t)options.file_id != snap_id) {
+                            continue;
+                        }
+                        uint8_t record_type = (hdr->obj_id_and_type & OBJ_TYPE_MASK) >> OBJ_TYPE_SHIFT;
+                        if (record_type == APFS_TYPE_SNAP_METADATA && record_type_selected(&options, "snap-meta")) {
+                            j_snap_metadata_val_t* val = val_end - toc_entry->v;
+                            num_matches++;
+                            if (!options.summary_only) {
+                                printf("\rSNAP_META %#8" PRIx64 " || SnapID = %#9" PRIx64 " || Name = %.*s\n",
+                                    addr,
+                                    snap_id,
+                                    val->name_len,
+                                    val->name
+                                );
+                            }
+                            if (options.export_stream) {
+                                export_snap_meta(options.export_stream, addr, node, val, snap_id);
+                            }
+                        } else if (record_type == APFS_TYPE_SNAP_NAME && record_type_selected(&options, "snap-name")) {
+                            j_snap_name_key_t* key = (j_snap_name_key_t*)hdr;
+                            j_snap_name_val_t* val = val_end - toc_entry->v;
+                            num_matches++;
+                            if (!options.summary_only) {
+                                printf("\rSNAP_NAME %#8" PRIx64 " || SnapID = %#9" PRIx64 " || Name = %.*s || XID = %#" PRIx64 "\n",
+                                    addr,
+                                    snap_id,
+                                    key->name_len,
+                                    key->name,
+                                    val->snap_xid
+                                );
+                            }
+                            if (options.export_stream) {
+                                export_snap_name(options.export_stream, addr, node, key, val, snap_id);
+                            }
+                        }
+                    }
+                } else {
+                    kvloc_t* toc_entry = toc_start;
+                    for (uint32_t i = 0; i < node->btn_nkeys; i++, toc_entry++) {
+                        j_key_t* hdr = key_start + toc_entry->k.off;
+                        uint64_t snap_id = hdr->obj_id_and_type & OBJ_ID_MASK;
+                        if (options.file_id != -1 && (uint64_t)options.file_id != snap_id) {
+                            continue;
+                        }
+                        uint8_t record_type = (hdr->obj_id_and_type & OBJ_TYPE_MASK) >> OBJ_TYPE_SHIFT;
+                        if (record_type == APFS_TYPE_SNAP_METADATA && record_type_selected(&options, "snap-meta")) {
+                            j_snap_metadata_val_t* val = val_end - toc_entry->v.off;
+                            num_matches++;
+                            if (!options.summary_only) {
+                                printf("\rSNAP_META %#8" PRIx64 " || SnapID = %#9" PRIx64 " || Name = %.*s\n",
+                                    addr,
+                                    snap_id,
+                                    val->name_len,
+                                    val->name
+                                );
+                            }
+                            if (options.export_stream) {
+                                export_snap_meta(options.export_stream, addr, node, val, snap_id);
+                            }
+                        } else if (record_type == APFS_TYPE_SNAP_NAME && record_type_selected(&options, "snap-name")) {
+                            j_snap_name_key_t* key = (j_snap_name_key_t*)hdr;
+                            j_snap_name_val_t* val = val_end - toc_entry->v.off;
+                            num_matches++;
+                            if (!options.summary_only) {
+                                printf("\rSNAP_NAME %#8" PRIx64 " || SnapID = %#9" PRIx64 " || Name = %.*s || XID = %#" PRIx64 "\n",
+                                    addr,
+                                    snap_id,
+                                    key->name_len,
+                                    key->name,
+                                    val->snap_xid
+                                );
+                            }
+                            if (options.export_stream) {
+                                export_snap_name(options.export_stream, addr, node, key, val, snap_id);
+                            }
+                        }
+                    }
+                }
+            }
+
+            /** Scan fext tree records (sealed volumes) **/
+            if (   is_btree_node_phys(block)
+                && is_fext_tree(block)
+                && (record_type_selected(&options, "fext") || options.report)
+            ) {
+                btree_node_phys_t* node = block;
+                if (!(node->btn_flags & BTNODE_LEAF)) {
+                    continue;
+                }
+
+                char* toc_start = (char*)node->btn_data + node->btn_table_space.off;
+                char* key_start = toc_start + node->btn_table_space.len;
+                char* val_end   = (char*)node + globals.block_size;
+                if (node->btn_flags & BTNODE_ROOT) {
+                    val_end -= sizeof(btree_info_t);
+                }
+
+                if (node->btn_flags & BTNODE_FIXED_KV_SIZE) {
+                    kvoff_t* toc_entry = toc_start;
+                    for (uint32_t i = 0; i < node->btn_nkeys; i++, toc_entry++) {
+                        fext_tree_key_t* key = key_start + toc_entry->k;
+                        fext_tree_val_t* val = val_end - toc_entry->v;
+                        if (options.file_id != -1 && (uint64_t)options.file_id != key->private_id) {
+                            continue;
+                        }
+                        num_matches++;
+                        if (!options.summary_only && record_type_selected(&options, "fext")) {
+                            uint64_t length_bytes = val->len_and_flags & J_FILE_EXTENT_LEN_MASK;
+                            printf("\rFEXT %#8" PRIx64 " || FileID = %#9" PRIx64 " || Logical = %#" PRIx64 " || Phys = %#" PRIx64 " || Length = %" PRIu64 "\n",
+                                addr,
+                                key->private_id,
+                                key->logical_addr,
+                                val->phys_block_num,
+                                length_bytes
+                            );
+                        }
+                        if (options.export_stream && record_type_selected(&options, "fext")) {
+                            export_fext(options.export_stream, addr, node, key, val);
+                        }
+                        if (options.report) {
+                            uint64_t length_bytes = val->len_and_flags & J_FILE_EXTENT_LEN_MASK;
+                            extent_item_t item = {
+                                .file_id = key->private_id,
+                                .length_bytes = length_bytes,
+                            };
+                            extent_item_t* updated = realloc(extent_items, (num_extent_items + 1) * sizeof(*extent_items));
+                            if (!updated) {
+                                fprintf(stderr, "\nWARNING: Not enough memory to track extent stats; report will be incomplete.\n");
+                                options.report = false;
+                            } else {
+                                extent_items = updated;
+                                extent_items[num_extent_items++] = item;
+                            }
+                        }
+                    }
+                } else {
+                    kvloc_t* toc_entry = toc_start;
+                    for (uint32_t i = 0; i < node->btn_nkeys; i++, toc_entry++) {
+                        fext_tree_key_t* key = key_start + toc_entry->k.off;
+                        fext_tree_val_t* val = val_end - toc_entry->v.off;
+                        if (options.file_id != -1 && (uint64_t)options.file_id != key->private_id) {
+                            continue;
+                        }
+                        num_matches++;
+                        if (!options.summary_only && record_type_selected(&options, "fext")) {
+                            uint64_t length_bytes = val->len_and_flags & J_FILE_EXTENT_LEN_MASK;
+                            printf("\rFEXT %#8" PRIx64 " || FileID = %#9" PRIx64 " || Logical = %#" PRIx64 " || Phys = %#" PRIx64 " || Length = %" PRIu64 "\n",
+                                addr,
+                                key->private_id,
+                                key->logical_addr,
+                                val->phys_block_num,
+                                length_bytes
+                            );
+                        }
+                        if (options.export_stream && record_type_selected(&options, "fext")) {
+                            export_fext(options.export_stream, addr, node, key, val);
+                        }
+                        if (options.report) {
+                            uint64_t length_bytes = val->len_and_flags & J_FILE_EXTENT_LEN_MASK;
+                            extent_item_t item = {
+                                .file_id = key->private_id,
+                                .length_bytes = length_bytes,
+                            };
+                            extent_item_t* updated = realloc(extent_items, (num_extent_items + 1) * sizeof(*extent_items));
+                            if (!updated) {
+                                fprintf(stderr, "\nWARNING: Not enough memory to track extent stats; report will be incomplete.\n");
+                                options.report = false;
+                            } else {
+                                extent_items = updated;
+                                extent_items[num_extent_items++] = item;
+                            }
+                        }
+                    }
+                }
+            }
+
             blocks_scanned++;
         }
     }
@@ -1049,203 +1248,6 @@ int cmd_search(int argc, char** argv) {
             }
         }
 
-        /** Scan snapshot metadata tree records **/
-        if (   is_btree_node_phys(block)
-            && is_snap_meta_tree(block)
-            && (record_type_selected(&options, "snap-meta") || record_type_selected(&options, "snap-name"))
-        ) {
-            btree_node_phys_t* node = block;
-            if (!(node->btn_flags & BTNODE_LEAF)) {
-                continue;
-            }
-
-            char* toc_start = (char*)node->btn_data + node->btn_table_space.off;
-            char* key_start = toc_start + node->btn_table_space.len;
-            char* val_end   = (char*)node + globals.block_size;
-            if (node->btn_flags & BTNODE_ROOT) {
-                val_end -= sizeof(btree_info_t);
-            }
-
-            if (node->btn_flags & BTNODE_FIXED_KV_SIZE) {
-                kvoff_t* toc_entry = toc_start;
-                for (uint32_t i = 0; i < node->btn_nkeys; i++, toc_entry++) {
-                    j_key_t* hdr = key_start + toc_entry->k;
-                    uint64_t snap_id = hdr->obj_id_and_type & OBJ_ID_MASK;
-                    if (options.file_id != -1 && (uint64_t)options.file_id != snap_id) {
-                        continue;
-                    }
-                    uint8_t record_type = (hdr->obj_id_and_type & OBJ_TYPE_MASK) >> OBJ_TYPE_SHIFT;
-                    if (record_type == APFS_TYPE_SNAP_METADATA && record_type_selected(&options, "snap-meta")) {
-                        j_snap_metadata_val_t* val = val_end - toc_entry->v;
-                        num_matches++;
-                        if (!options.summary_only) {
-                            printf("\rSNAP_META %#8" PRIx64 " || SnapID = %#9" PRIx64 " || Name = %.*s\n",
-                                addr,
-                                snap_id,
-                                val->name_len,
-                                val->name
-                            );
-                        }
-                        if (options.export_stream) {
-                            export_snap_meta(options.export_stream, addr, node, val, snap_id);
-                        }
-                    } else if (record_type == APFS_TYPE_SNAP_NAME && record_type_selected(&options, "snap-name")) {
-                        j_snap_name_key_t* key = (j_snap_name_key_t*)hdr;
-                        j_snap_name_val_t* val = val_end - toc_entry->v;
-                        num_matches++;
-                        if (!options.summary_only) {
-                            printf("\rSNAP_NAME %#8" PRIx64 " || SnapID = %#9" PRIx64 " || Name = %.*s || XID = %#" PRIx64 "\n",
-                                addr,
-                                snap_id,
-                                key->name_len,
-                                key->name,
-                                val->snap_xid
-                            );
-                        }
-                        if (options.export_stream) {
-                            export_snap_name(options.export_stream, addr, node, key, val, snap_id);
-                        }
-                    }
-                }
-            } else {
-                kvloc_t* toc_entry = toc_start;
-                for (uint32_t i = 0; i < node->btn_nkeys; i++, toc_entry++) {
-                    j_key_t* hdr = key_start + toc_entry->k.off;
-                    uint64_t snap_id = hdr->obj_id_and_type & OBJ_ID_MASK;
-                    if (options.file_id != -1 && (uint64_t)options.file_id != snap_id) {
-                        continue;
-                    }
-                    uint8_t record_type = (hdr->obj_id_and_type & OBJ_TYPE_MASK) >> OBJ_TYPE_SHIFT;
-                    if (record_type == APFS_TYPE_SNAP_METADATA && record_type_selected(&options, "snap-meta")) {
-                        j_snap_metadata_val_t* val = val_end - toc_entry->v.off;
-                        num_matches++;
-                        if (!options.summary_only) {
-                            printf("\rSNAP_META %#8" PRIx64 " || SnapID = %#9" PRIx64 " || Name = %.*s\n",
-                                addr,
-                                snap_id,
-                                val->name_len,
-                                val->name
-                            );
-                        }
-                        if (options.export_stream) {
-                            export_snap_meta(options.export_stream, addr, node, val, snap_id);
-                        }
-                    } else if (record_type == APFS_TYPE_SNAP_NAME && record_type_selected(&options, "snap-name")) {
-                        j_snap_name_key_t* key = (j_snap_name_key_t*)hdr;
-                        j_snap_name_val_t* val = val_end - toc_entry->v.off;
-                        num_matches++;
-                        if (!options.summary_only) {
-                            printf("\rSNAP_NAME %#8" PRIx64 " || SnapID = %#9" PRIx64 " || Name = %.*s || XID = %#" PRIx64 "\n",
-                                addr,
-                                snap_id,
-                                key->name_len,
-                                key->name,
-                                val->snap_xid
-                            );
-                        }
-                        if (options.export_stream) {
-                            export_snap_name(options.export_stream, addr, node, key, val, snap_id);
-                        }
-                    }
-                }
-            }
-        }
-
-        /** Scan fext tree records (sealed volumes) **/
-        if (   is_btree_node_phys(block)
-            && is_fext_tree(block)
-            && (record_type_selected(&options, "fext") || options.report)
-        ) {
-            btree_node_phys_t* node = block;
-            if (!(node->btn_flags & BTNODE_LEAF)) {
-                continue;
-            }
-
-            char* toc_start = (char*)node->btn_data + node->btn_table_space.off;
-            char* key_start = toc_start + node->btn_table_space.len;
-            char* val_end   = (char*)node + globals.block_size;
-            if (node->btn_flags & BTNODE_ROOT) {
-                val_end -= sizeof(btree_info_t);
-            }
-
-            if (node->btn_flags & BTNODE_FIXED_KV_SIZE) {
-                kvoff_t* toc_entry = toc_start;
-                for (uint32_t i = 0; i < node->btn_nkeys; i++, toc_entry++) {
-                    fext_tree_key_t* key = key_start + toc_entry->k;
-                    fext_tree_val_t* val = val_end - toc_entry->v;
-                    if (options.file_id != -1 && (uint64_t)options.file_id != key->private_id) {
-                        continue;
-                    }
-                    num_matches++;
-                    if (!options.summary_only && record_type_selected(&options, "fext")) {
-                        uint64_t length_bytes = val->len_and_flags & J_FILE_EXTENT_LEN_MASK;
-                        printf("\rFEXT %#8" PRIx64 " || FileID = %#9" PRIx64 " || Logical = %#" PRIx64 " || Phys = %#" PRIx64 " || Length = %" PRIu64 "\n",
-                            addr,
-                            key->private_id,
-                            key->logical_addr,
-                            val->phys_block_num,
-                            length_bytes
-                        );
-                    }
-                    if (options.export_stream && record_type_selected(&options, "fext")) {
-                        export_fext(options.export_stream, addr, node, key, val);
-                    }
-                    if (options.report) {
-                        uint64_t length_bytes = val->len_and_flags & J_FILE_EXTENT_LEN_MASK;
-                        extent_item_t item = {
-                            .file_id = key->private_id,
-                            .length_bytes = length_bytes,
-                        };
-                        extent_item_t* updated = realloc(extent_items, (num_extent_items + 1) * sizeof(*extent_items));
-                        if (!updated) {
-                            fprintf(stderr, "\nWARNING: Not enough memory to track extent stats; report will be incomplete.\n");
-                            options.report = false;
-                        } else {
-                            extent_items = updated;
-                            extent_items[num_extent_items++] = item;
-                        }
-                    }
-                }
-            } else {
-                kvloc_t* toc_entry = toc_start;
-                for (uint32_t i = 0; i < node->btn_nkeys; i++, toc_entry++) {
-                    fext_tree_key_t* key = key_start + toc_entry->k.off;
-                    fext_tree_val_t* val = val_end - toc_entry->v.off;
-                    if (options.file_id != -1 && (uint64_t)options.file_id != key->private_id) {
-                        continue;
-                    }
-                    num_matches++;
-                    if (!options.summary_only && record_type_selected(&options, "fext")) {
-                        uint64_t length_bytes = val->len_and_flags & J_FILE_EXTENT_LEN_MASK;
-                        printf("\rFEXT %#8" PRIx64 " || FileID = %#9" PRIx64 " || Logical = %#" PRIx64 " || Phys = %#" PRIx64 " || Length = %" PRIu64 "\n",
-                            addr,
-                            key->private_id,
-                            key->logical_addr,
-                            val->phys_block_num,
-                            length_bytes
-                        );
-                    }
-                    if (options.export_stream && record_type_selected(&options, "fext")) {
-                        export_fext(options.export_stream, addr, node, key, val);
-                    }
-                    if (options.report) {
-                        uint64_t length_bytes = val->len_and_flags & J_FILE_EXTENT_LEN_MASK;
-                        extent_item_t item = {
-                            .file_id = key->private_id,
-                            .length_bytes = length_bytes,
-                        };
-                        extent_item_t* updated = realloc(extent_items, (num_extent_items + 1) * sizeof(*extent_items));
-                        if (!updated) {
-                            fprintf(stderr, "\nWARNING: Not enough memory to track extent stats; report will be incomplete.\n");
-                            options.report = false;
-                        } else {
-                            extent_items = updated;
-                            extent_items[num_extent_items++] = item;
-                        }
-                    }
-                }
-            }
-        }
     }
 
     printf("\n\nFinished search; found %" PRIu64 " results.\n\n", num_matches);
