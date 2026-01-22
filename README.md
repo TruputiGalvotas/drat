@@ -94,6 +94,7 @@ Commands:
     - `--matches-only`: only print matches (suppress full listing).
     - `--summary`: only show progress and match counts (suppress match output).
     - `--export <path>`: write CSV results (see below).
+    - `--min-size <bytes>`: minimum file-extent size in bytes.
     - `--report`: report total extent sizes by file ID.
     - `--spaceman-zones`: restrict scanning to spaceman allocation zones.
     - `--resolve-names`: try to map file IDs to names and include them in reports/exports.

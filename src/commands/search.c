@@ -73,6 +73,7 @@ typedef struct {
     bool resolve_names;
     bool unique_files;
     bool any_btree;
+    int64_t min_extent_bytes;
     size_t num_scan_ranges;
     oid_range_t* scan_ranges;
     size_t num_record_types;
@@ -112,6 +113,7 @@ typedef struct {
 #define DRAT_ARG_KEY_RESOLVE_NAMES      (DRAT_GLOBAL_ARGS_LAST_KEY - 18)
 #define DRAT_ARG_KEY_UNIQUE_FILES       (DRAT_GLOBAL_ARGS_LAST_KEY - 19)
 #define DRAT_ARG_KEY_ANY_BTREE          (DRAT_GLOBAL_ARGS_LAST_KEY - 20)
+#define DRAT_ARG_KEY_MIN_SIZE           (DRAT_GLOBAL_ARGS_LAST_KEY - 21)
 
 #define DRAT_ARG_ERR_INVALID_START              (DRAT_GLOBAL_ARGS_LAST_ERR - 1)
 #define DRAT_ARG_ERR_INVALID_END                (DRAT_GLOBAL_ARGS_LAST_ERR - 2)
@@ -125,6 +127,7 @@ typedef struct {
 #define DRAT_ARG_ERR_INVALID_RECORD_TYPE        (DRAT_GLOBAL_ARGS_LAST_ERR - 10)
 #define DRAT_ARG_ERR_INVALID_FILE_ID            (DRAT_GLOBAL_ARGS_LAST_ERR - 11)
 #define DRAT_ARG_ERR_INVALID_SPACEMAN           (DRAT_GLOBAL_ARGS_LAST_ERR - 12)
+#define DRAT_ARG_ERR_INVALID_MIN_SIZE           (DRAT_GLOBAL_ARGS_LAST_ERR - 13)
 
 static const struct argp_option argp_options[] = {
     // char* name,       int key,                    char* arg,            int flags,   char* doc
@@ -148,6 +151,7 @@ static const struct argp_option argp_options[] = {
     { "resolve-names",   DRAT_ARG_KEY_RESOLVE_NAMES,  0,                    0,           "Resolve file IDs to names when possible" },
     { "unique-files",    DRAT_ARG_KEY_UNIQUE_FILES,   0,                    0,           "Export only the first occurrence per file ID" },
     { "any-btree",       DRAT_ARG_KEY_ANY_BTREE,      0,                    0,           "Scan any B-tree leaf for file-system records (may include false positives)" },
+    { "min-size",        DRAT_ARG_KEY_MIN_SIZE,       "bytes",              0,           "Minimum extent size in bytes (decimal or hex)" },
     {0}
 };
 
@@ -411,6 +415,11 @@ static error_t argp_parser(int key, char* arg, struct argp_state* state) {
             break;
         case DRAT_ARG_KEY_ANY_BTREE:
             options->any_btree = true;
+            break;
+        case DRAT_ARG_KEY_MIN_SIZE:
+            if (!parse_number(&options->min_extent_bytes, arg) || options->min_extent_bytes < 0) {
+                return DRAT_ARG_ERR_INVALID_MIN_SIZE;
+            }
             break;
         case DRAT_ARG_KEY_EXPORT:
             if (!arg || !*arg) {
@@ -690,6 +699,7 @@ int cmd_search(int argc, char** argv) {
         .resolve_names = false,
         .unique_files = false,
         .any_btree = false,
+        .min_extent_bytes = 0,
         .num_scan_ranges = 0,
         .scan_ranges = NULL,
         .num_record_types = 0,
@@ -752,6 +762,9 @@ int cmd_search(int argc, char** argv) {
                 break;
             case DRAT_ARG_ERR_INVALID_SPACEMAN:
                 fprintf(stderr, "%s: option `--spaceman-zones` failed to initialize spaceman ranges.\n", globals.program_name);
+                break;
+            case DRAT_ARG_ERR_INVALID_MIN_SIZE:
+                fprintf(stderr, "%s: option `--min-size` has invalid value; must be a non-negative integer.\n", globals.program_name);
                 break;
             default:
                 print_arg_parse_error();
@@ -914,6 +927,8 @@ int cmd_search(int argc, char** argv) {
     }
     extent_item_t* extent_items = NULL;
     size_t num_extent_items = 0;
+    uint64_t total_extent_bytes = 0;
+    uint64_t total_extent_count = 0;
     name_map_t* name_map = NULL;
     size_t num_name_map = 0;
     file_id_t* exported_file_ids = NULL;
@@ -1124,6 +1139,10 @@ int cmd_search(int argc, char** argv) {
                     if (options.file_id != -1 && (uint64_t)options.file_id != (key->hdr.obj_id_and_type & OBJ_ID_MASK)) {
                         continue;
                     }
+                    uint64_t length_bytes = val->len_and_flags & J_FILE_EXTENT_LEN_MASK;
+                    if (options.min_extent_bytes > 0 && length_bytes < (uint64_t)options.min_extent_bytes) {
+                        continue;
+                    }
                     num_matches++;
                     if (options.export_stream && record_type_selected(&options, "file-extent")) {
                         size_t name_len = 0;
@@ -1136,7 +1155,6 @@ int cmd_search(int argc, char** argv) {
                         }
                     }
                     if (options.report) {
-                        uint64_t length_bytes = val->len_and_flags & J_FILE_EXTENT_LEN_MASK;
                         extent_item_t item = {
                             .file_id = key->hdr.obj_id_and_type & OBJ_ID_MASK,
                             .length_bytes = length_bytes,
@@ -1148,6 +1166,8 @@ int cmd_search(int argc, char** argv) {
                         } else {
                             extent_items = updated;
                             extent_items[num_extent_items++] = item;
+                            total_extent_bytes += length_bytes;
+                            total_extent_count++;
                         }
                     }
                 }
@@ -1281,9 +1301,12 @@ int cmd_search(int argc, char** argv) {
                         if (options.file_id != -1 && (uint64_t)options.file_id != key->private_id) {
                             continue;
                         }
+                        uint64_t length_bytes = val->len_and_flags & J_FILE_EXTENT_LEN_MASK;
+                        if (options.min_extent_bytes > 0 && length_bytes < (uint64_t)options.min_extent_bytes) {
+                            continue;
+                        }
                         num_matches++;
                         if (!options.summary_only && record_type_selected(&options, "fext")) {
-                            uint64_t length_bytes = val->len_and_flags & J_FILE_EXTENT_LEN_MASK;
                             printf("\rFEXT %#8" PRIx64 " || FileID = %#9" PRIx64 " || Logical = %#" PRIx64 " || Phys = %#" PRIx64 " || Length = %" PRIu64 "\n",
                                 addr,
                                 key->private_id,
@@ -1298,7 +1321,6 @@ int cmd_search(int argc, char** argv) {
                             }
                         }
                         if (options.report) {
-                            uint64_t length_bytes = val->len_and_flags & J_FILE_EXTENT_LEN_MASK;
                             extent_item_t item = {
                                 .file_id = key->private_id,
                                 .length_bytes = length_bytes,
@@ -1310,6 +1332,8 @@ int cmd_search(int argc, char** argv) {
                             } else {
                                 extent_items = updated;
                                 extent_items[num_extent_items++] = item;
+                                total_extent_bytes += length_bytes;
+                                total_extent_count++;
                             }
                         }
                     }
@@ -1321,9 +1345,12 @@ int cmd_search(int argc, char** argv) {
                         if (options.file_id != -1 && (uint64_t)options.file_id != key->private_id) {
                             continue;
                         }
+                        uint64_t length_bytes = val->len_and_flags & J_FILE_EXTENT_LEN_MASK;
+                        if (options.min_extent_bytes > 0 && length_bytes < (uint64_t)options.min_extent_bytes) {
+                            continue;
+                        }
                         num_matches++;
                         if (!options.summary_only && record_type_selected(&options, "fext")) {
-                            uint64_t length_bytes = val->len_and_flags & J_FILE_EXTENT_LEN_MASK;
                             printf("\rFEXT %#8" PRIx64 " || FileID = %#9" PRIx64 " || Logical = %#" PRIx64 " || Phys = %#" PRIx64 " || Length = %" PRIu64 "\n",
                                 addr,
                                 key->private_id,
@@ -1338,7 +1365,6 @@ int cmd_search(int argc, char** argv) {
                             }
                         }
                         if (options.report) {
-                            uint64_t length_bytes = val->len_and_flags & J_FILE_EXTENT_LEN_MASK;
                             extent_item_t item = {
                                 .file_id = key->private_id,
                                 .length_bytes = length_bytes,
@@ -1350,6 +1376,8 @@ int cmd_search(int argc, char** argv) {
                             } else {
                                 extent_items = updated;
                                 extent_items[num_extent_items++] = item;
+                                total_extent_bytes += length_bytes;
+                                total_extent_count++;
                             }
                         }
                     }
@@ -1365,6 +1393,13 @@ int cmd_search(int argc, char** argv) {
         if (num_extent_items == 0) {
             printf("\nReport: no file extents collected.\n");
         } else {
+            char total_human[32];
+            format_bytes_decimal(total_extent_bytes, total_human, sizeof(total_human));
+            printf("\nReport: total extent bytes=%" PRIu64 " (%s) across %" PRIu64 " extents\n",
+                total_extent_bytes,
+                total_human,
+                total_extent_count
+            );
             qsort(extent_items, num_extent_items, sizeof(*extent_items), compare_extent_items);
             extent_stat_t* stats = malloc(num_extent_items * sizeof(*stats));
             if (!stats) {
