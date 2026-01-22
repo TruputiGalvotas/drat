@@ -98,6 +98,7 @@ Commands:
     - `--spaceman-zones`: restrict scanning to spaceman allocation zones.
     - `--resolve-names`: try to map file IDs to names and include them in reports/exports.
     - `--unique-files`: export only the first occurrence per file ID.
+    - `--any-btree`: scan any B-tree leaf for file-system records (may include false positives).
   - Default behavior scans the whole container and prints dentries.
 
 - `recover`
@@ -108,7 +109,7 @@ Commands:
     - `drat recover --container <container> --from-search <export.csv> --file-id <file-id> [--output <path>]`
     - `drat recover --container <container> --from-search <export.csv> --name <file name> [--output <path>]`
   - Raw extent scan (metadata-missing mode):
-    - `drat recover --container <container> --scan-extents --file-id <file-id> [--start <block>] [--end <block>] [--output <path>] [--no-cksum]`
+    - `drat recover --container <container> --scan-extents --file-id <file-id> [--any-btree] [--start <block>] [--end <block>] [--output <path>] [--no-cksum]`
   - Options:
     - `--output <path>`: output file path (use `-` for stdout; if a directory, a file is created inside).
     - `--skip-multilinked-inodes`: recover multi-linked files as empty files.
@@ -122,7 +123,7 @@ Notes:
 - Numerical arguments accept decimal, hex (`0x`), or octal (`0`) formats.
 - `modify` exists in the source tree but is currently disabled and not exposed as a command.
 - `search --export` writes CSV with columns:
-  - `type,block_addr,node_oid,node_xid,file_id,name,logical_addr,phys_block,length_bytes`
+  - `type,block_addr,node_oid,node_xid,file_id,name,logical_addr,phys_block,length_bytes,length_human`
   - `type` can include `DENTRY`, `FILE_EXTENT`, `SNAP_META`, `SNAP_NAME`, `FEXT`.
 
 ### Compiling the software

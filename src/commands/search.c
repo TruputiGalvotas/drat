@@ -72,6 +72,7 @@ typedef struct {
     bool use_spaceman_zones;
     bool resolve_names;
     bool unique_files;
+    bool any_btree;
     size_t num_scan_ranges;
     oid_range_t* scan_ranges;
     size_t num_record_types;
@@ -110,6 +111,7 @@ typedef struct {
 #define DRAT_ARG_KEY_SPACEMAN_ZONES     (DRAT_GLOBAL_ARGS_LAST_KEY - 17)
 #define DRAT_ARG_KEY_RESOLVE_NAMES      (DRAT_GLOBAL_ARGS_LAST_KEY - 18)
 #define DRAT_ARG_KEY_UNIQUE_FILES       (DRAT_GLOBAL_ARGS_LAST_KEY - 19)
+#define DRAT_ARG_KEY_ANY_BTREE          (DRAT_GLOBAL_ARGS_LAST_KEY - 20)
 
 #define DRAT_ARG_ERR_INVALID_START              (DRAT_GLOBAL_ARGS_LAST_ERR - 1)
 #define DRAT_ARG_ERR_INVALID_END                (DRAT_GLOBAL_ARGS_LAST_ERR - 2)
@@ -145,6 +147,7 @@ static const struct argp_option argp_options[] = {
     { "spaceman-zones",  DRAT_ARG_KEY_SPACEMAN_ZONES, 0,                    0,           "Restrict scan to spaceman data zones" },
     { "resolve-names",   DRAT_ARG_KEY_RESOLVE_NAMES,  0,                    0,           "Resolve file IDs to names when possible" },
     { "unique-files",    DRAT_ARG_KEY_UNIQUE_FILES,   0,                    0,           "Export only the first occurrence per file ID" },
+    { "any-btree",       DRAT_ARG_KEY_ANY_BTREE,      0,                    0,           "Scan any B-tree leaf for file-system records (may include false positives)" },
     {0}
 };
 
@@ -405,6 +408,9 @@ static error_t argp_parser(int key, char* arg, struct argp_state* state) {
             break;
         case DRAT_ARG_KEY_UNIQUE_FILES:
             options->unique_files = true;
+            break;
+        case DRAT_ARG_KEY_ANY_BTREE:
+            options->any_btree = true;
             break;
         case DRAT_ARG_KEY_EXPORT:
             if (!arg || !*arg) {
@@ -683,6 +689,7 @@ int cmd_search(int argc, char** argv) {
         .use_spaceman_zones = false,
         .resolve_names = false,
         .unique_files = false,
+        .any_btree = false,
         .num_scan_ranges = 0,
         .scan_ranges = NULL,
         .num_record_types = 0,
@@ -1035,7 +1042,7 @@ int cmd_search(int argc, char** argv) {
 
         /** Scan FS B-tree records **/
         if (   is_btree_node_phys(block)
-            && is_fs_tree(block)
+            && (is_fs_tree(block) || options.any_btree)
             && (record_type_selected(&options, "dentry") || record_type_selected(&options, "file-extent") || options.report)
         ) {
             btree_node_phys_t* node = block;

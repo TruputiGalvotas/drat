@@ -46,6 +46,7 @@ typedef struct {
     int64_t start_addr;
     int64_t end_addr;
     bool    require_cksum;
+    bool    any_btree;
 } options_t;
 
 #define DRAT_ARG_KEY_FSOID  (DRAT_GLOBAL_ARGS_LAST_KEY - 1)
@@ -59,6 +60,7 @@ typedef struct {
 #define DRAT_ARG_KEY_START (DRAT_GLOBAL_ARGS_LAST_KEY - 9)
 #define DRAT_ARG_KEY_END (DRAT_GLOBAL_ARGS_LAST_KEY - 10)
 #define DRAT_ARG_KEY_NO_CKSUM (DRAT_GLOBAL_ARGS_LAST_KEY - 11)
+#define DRAT_ARG_KEY_ANY_BTREE (DRAT_GLOBAL_ARGS_LAST_KEY - 12)
 
 #define DRAT_ARG_ERR_INVALID_FSOID  (DRAT_GLOBAL_ARGS_LAST_ERR - 1)
 #define DRAT_ARG_ERR_INVALID_PATH   (DRAT_GLOBAL_ARGS_LAST_ERR - 2)
@@ -82,6 +84,7 @@ static const struct argp_option argp_options[] = {
     { "file-id",    DRAT_ARG_KEY_FILE_ID,   "file-id",      0,          "File ID to recover (used with --from-search or --scan-extents)" },
     { "name",       DRAT_ARG_KEY_NAME,      "name",         0,          "File name to recover (used with --from-search)" },
     { "scan-extents", DRAT_ARG_KEY_SCAN_EXTENTS, 0,         0,          "Scan container for file extents (metadata-missing mode)" },
+    { "any-btree",  DRAT_ARG_KEY_ANY_BTREE,  0,            0,          "Scan any B-tree leaf for file extents (may include false positives)" },
     { "start",      DRAT_ARG_KEY_START,     "block addr",   0,          "Start block address for extent scan" },
     { "end",        DRAT_ARG_KEY_END,       "block addr",   0,          "End block address for extent scan" },
     { "no-cksum",   DRAT_ARG_KEY_NO_CKSUM,  0,              0,          "Do not require checksum validation during extent scan" },
@@ -141,6 +144,9 @@ static error_t argp_parser(int key, char* arg, struct argp_state* state) {
             break;
         case DRAT_ARG_KEY_NO_CKSUM:
             options->require_cksum = false;
+            break;
+        case DRAT_ARG_KEY_ANY_BTREE:
+            options->any_btree = true;
             break;
         case ARGP_KEY_END:
             if (options->from_search && options->scan_extents) {
@@ -548,7 +554,7 @@ static int recover_from_extent_scan(options_t* options, FILE* file_stream, FILE*
             continue;
         }
 
-        if (is_btree_node_phys(block) && is_fs_tree(block)) {
+        if (is_btree_node_phys(block) && (is_fs_tree(block) || options->any_btree)) {
             btree_node_phys_t* node = block;
             if (node->btn_flags & BTNODE_FIXED_KV_SIZE) {
                 continue;
@@ -608,7 +614,7 @@ static void print_usage(FILE* stream) {
         "  %1$s %2$s --container <container> --volume <volume index> --path <file path>\n"
         "  %1$s %2$s --container <container> --from-search <export.csv> --file-id <file-id> [--output <path>]\n"
         "  %1$s %2$s --container <container> --from-search <export.csv> --name <file name> [--output <path>]\n"
-        "  %1$s %2$s --container <container> --scan-extents --file-id <file-id> [--start <block>] [--end <block>] [--output <path>]\n"
+        "  %1$s %2$s --container <container> --scan-extents --file-id <file-id> [--any-btree] [--start <block>] [--end <block>] [--output <path>]\n"
         "Examples:\n"
         "  %1$s %2$s --container /dev/disk0s2 --volume 1 0xd02a4 --fsoid 0x3af2\n"
         "  %1$s %2$s --container /dev/disk0s2 --volume 1 0xd02a4 --path /Users/john/Documents/file.txt\n"
@@ -641,6 +647,7 @@ int cmd_recover(int argc, char** argv) {
         .start_addr = -1,
         .end_addr = -1,
         .require_cksum = true,
+        .any_btree = false,
     };
 
     bool usage_error = true;
