@@ -32,12 +32,19 @@
 #include <drat/string/fs.h>
 #include <drat/string/j.h>
 
+typedef struct options_t {
+    int64_t fsoid;  // Needs to be `int64_t to work with `parse_number()`
+    char* path;
+    bool require_cksum;
+    int64_t snapshot_xid;
+    char* snapshot_name;
+    bool all_snapshots;
+} options_t;
+
 static bool name_equals(const uint8_t* name, uint16_t name_len, const char* query) {
     size_t query_len = strlen(query);
     return query_len == name_len && strncmp((const char*)name, query, name_len) == 0;
 }
-
-typedef struct options_t options_t;
 
 typedef struct {
     xid_t xid;
@@ -406,15 +413,6 @@ static xid_t find_snapshot_xid(btree_node_phys_t* fs_omap_btree, apfs_superblock
     free(stack);
     return 0;
 }
-
-typedef struct options_t {
-    int64_t fsoid;  // Needs to be `int64_t to work with `parse_number()`
-    char* path;
-    bool require_cksum;
-    int64_t snapshot_xid;
-    char* snapshot_name;
-    bool all_snapshots;
-} options_t;
 
 #define DRAT_ARG_KEY_FSOID  (DRAT_GLOBAL_ARGS_LAST_KEY - 1)
 #define DRAT_ARG_KEY_PATH   (DRAT_GLOBAL_ARGS_LAST_KEY - 2)
